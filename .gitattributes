@@ -1,0 +1,5 @@
+# cmd.exe parses batch files byte-by-byte in the OEM codepage: LF-only endings
+# chop commands mid-word ('al' is not recognized). Force CRLF on checkout
+# regardless of the cloner's core.autocrlf setting.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
