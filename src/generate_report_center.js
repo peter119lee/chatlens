@@ -192,7 +192,7 @@ const writeHtml = (runs, config, outputHtml) => {
       <section class="panel">
         <h2>清理建议</h2>
         <p>默认新任务会清理 clean-db。旧任务可双击清理按钮移除临时数据库副本。</p>
-        <p class="path">QQ清理生成数据.cmd</p>
+        <p class="path">powershell -File scripts\\cleanup_generated_data.ps1</p>
       </section>
     </aside>
   </main>

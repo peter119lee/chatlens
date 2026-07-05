@@ -222,6 +222,9 @@ const renderSettingsView = () => {
   /* --- scheduled digest --- */
   const scheduleCard = renderScheduleCard();
 
+  /* --- disk cleanup --- */
+  const cleanupCard = renderCleanupCard();
+
   const aboutCard = el("div", { class: "card" },
     el("h2", {}, "安全说明"),
     el("ul", { style: "margin:0;padding-left:18px;font-size:13px;color:var(--muted);line-height:1.9" },
@@ -229,7 +232,53 @@ const renderSettingsView = () => {
       el("li", {}, "本地：控制台只监听 127.0.0.1，带每次启动随机生成的访问令牌。"),
       el("li", {}, "外部流量仅两处：头像走 QQ 公开 CDN；开启 AI 总结时消息文本会发送到你配置的 LLM 服务。")));
 
-  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, scheduleCard, aboutCard);
+  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, scheduleCard, cleanupCard, aboutCard);
+};
+
+// Move the old 清理生成数据.cmd here so freeing disk space stays a one-click
+// action inside the console instead of a separate launcher.
+const renderCleanupCard = () => {
+  const msg = el("span", { style: "font-size:13px" });
+  const daysInput = el("input", { type: "number", value: "7", min: "1", max: "365", style: "width:70px" });
+
+  const runCleanup = async (button, payload, describe) => {
+    button.disabled = true;
+    settingsFeedback(msg, "正在清理…", false);
+    try {
+      const result = await api("/api/cleanup", { method: "POST", body: JSON.stringify(payload) });
+      settingsFeedback(msg, `${describe}：释放 ${formatBytes(result.freedBytes)}（临时库 ${result.removedCleanDbCount} 个，删除运行 ${result.removedRunCount} 个）。`, false);
+    } catch (error) {
+      settingsFeedback(msg, error.message, true);
+    }
+    button.disabled = false;
+  };
+
+  return el("div", { class: "card" },
+    el("h2", {}, "磁盘清理"),
+    el("p", { class: "card-sub" },
+      "生成的扫描数据都在本机 runs\\ 目录。「临时数据库副本」是每次扫描解密出的 clean-db，删掉不影响报告；" +
+      "「旧运行」会连同该次的媒体副本一起删除（历史报告里的图片预览也会随之消失）。"),
+    el("div", { class: "row" },
+      el("button", {
+        class: "btn small primary",
+        onclick: (event) => runCleanup(event.target, {}, "已清理临时数据库副本"),
+      }, "清理临时数据库副本"),
+      el("span", { style: "width:16px" }),
+      el("span", { style: "font-size:13px" }, "删除"),
+      daysInput,
+      el("span", { style: "font-size:13px" }, "天前的旧运行"),
+      el("button", {
+        class: "btn small",
+        onclick: (event) => {
+          const days = Number.parseInt(daysInput.value, 10);
+          if (!Number.isInteger(days) || days < 1) {
+            settingsFeedback(msg, "请输入有效的天数。", true);
+            return;
+          }
+          runCleanup(event.target, { olderThanDays: days }, `已删除 ${days} 天前的旧运行`);
+        },
+      }, "执行"),
+      msg));
 };
 
 const renderScheduleCard = () => {

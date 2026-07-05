@@ -246,6 +246,15 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/cleanup") {
+      const body = await readBody(request);
+      const days = Number.parseInt(body.olderThanDays, 10);
+      sendJson(response, 200, state.cleanupGeneratedData({
+        olderThanDays: Number.isInteger(days) && days > 0 ? days : 0,
+      }));
+      return;
+    }
+
     if (request.method === "GET" && url.pathname === "/api/settings") {
       sendJson(response, 200, settings.getSettingsStatus());
       return;

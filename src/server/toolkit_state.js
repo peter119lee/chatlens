@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJson } = require("../report_utils");
-const { collectRuns, pathExists } = require("../run_index");
+const { collectRuns, pathExists, dirSize } = require("../run_index");
 const messageStore = require("../message_store");
 
 const toolRoot = path.resolve(__dirname, "..", "..");
@@ -494,6 +494,58 @@ const buildMediaIndex = (forceRefresh) => {
   return payload;
 };
 
+// Free disk space by removing per-run temp data. "clean-db" copies are always
+// safe to drop (regenerated on the next run); with olderThanDays > 0, whole run
+// directories past the cutoff (including their media copies) go too. Every
+// deletion is confined to runsDir with a resolved-path guard.
+const cleanupGeneratedData = ({ olderThanDays = 0 } = {}) => {
+  const config = loadConfig();
+  const runsDir = config.runsDir;
+  const result = { removedCleanDbCount: 0, removedRunCount: 0, freedBytes: 0 };
+  if (!pathExists(runsDir)) {
+    return result;
+  }
+
+  const runsResolved = path.resolve(runsDir);
+  const insideRuns = (target) => {
+    const relative = path.relative(runsResolved, path.resolve(target));
+    return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  };
+  const cutoffMs = olderThanDays > 0 ? Date.now() - olderThanDays * 24 * 60 * 60 * 1000 : null;
+
+  for (const entry of fs.readdirSync(runsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const runDir = path.join(runsDir, entry.name);
+    if (!insideRuns(runDir)) {
+      continue;
+    }
+
+    const cleanDbDir = path.join(runDir, "clean-db");
+    if (pathExists(cleanDbDir)) {
+      result.freedBytes += dirSize(cleanDbDir);
+      fs.rmSync(cleanDbDir, { recursive: true, force: true });
+      result.removedCleanDbCount += 1;
+    }
+
+    if (cutoffMs !== null) {
+      let stat;
+      try {
+        stat = fs.statSync(runDir);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs < cutoffMs) {
+        result.freedBytes += dirSize(runDir);
+        fs.rmSync(runDir, { recursive: true, force: true });
+        result.removedRunCount += 1;
+      }
+    }
+  }
+  return result;
+};
+
 const isPathAllowedToOpen = (targetPath) => {
   const config = loadConfig();
   const resolved = path.resolve(targetPath);
@@ -509,6 +561,7 @@ module.exports = {
   loadConfig,
   loadRawConfig,
   writeConfig,
+  cleanupGeneratedData,
   getState,
   updateWatchlist,
   getRunDetail,
