@@ -6,6 +6,7 @@ const { spawn } = require("node:child_process");
 const state = require("./toolkit_state");
 const jobs = require("./run_jobs");
 const settings = require("./settings_ops");
+const scheduler = require("./scheduler_ops");
 
 const BASE_PORT = 8321;
 const MAX_PORT_ATTEMPTS = 10;
@@ -288,6 +289,26 @@ const handleApi = async (request, response, url) => {
     if (request.method === "POST" && url.pathname === "/api/llm/models") {
       const body = await readBody(request);
       sendJson(response, 200, { models: await settings.fetchLlmModels(body.baseUrl) });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/schedule") {
+      sendJson(response, 200, await scheduler.getScheduleStatus());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/schedule") {
+      const body = await readBody(request);
+      if (body.enabled === false) {
+        sendJson(response, 200, await scheduler.disableSchedule());
+      } else {
+        sendJson(response, 200, await scheduler.enableSchedule(body));
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/schedule/run-now") {
+      sendJson(response, 200, await scheduler.runScheduleNow());
       return;
     }
 

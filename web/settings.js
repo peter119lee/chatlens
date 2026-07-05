@@ -2,7 +2,7 @@
 
 /* ---------- settings view: QQ paths, keys, LLM config ---------- */
 
-const settingsState = { status: null, models: [] };
+const settingsState = { status: null, models: [], schedule: null };
 
 const openSettingsView = async () => {
   showView("settings");
@@ -13,6 +13,12 @@ const openSettingsView = async () => {
     setChildren($("#view-settings"),
       el("div", { class: "card" }, el("div", { class: "notice risk" }, `读取设置失败: ${error.message}`)));
     return;
+  }
+  renderSettingsView();
+  try {
+    settingsState.schedule = await api("/api/schedule");
+  } catch {
+    settingsState.schedule = { enabled: false };
   }
   renderSettingsView();
 };
@@ -177,6 +183,9 @@ const renderSettingsView = () => {
       llmMsg),
     settingsState.models.length > 0 ? modelChips : null);
 
+  /* --- scheduled digest --- */
+  const scheduleCard = renderScheduleCard();
+
   const aboutCard = el("div", { class: "card" },
     el("h2", {}, "安全说明"),
     el("ul", { style: "margin:0;padding-left:18px;font-size:13px;color:var(--muted);line-height:1.9" },
@@ -184,5 +193,80 @@ const renderSettingsView = () => {
       el("li", {}, "本地：控制台只监听 127.0.0.1，带每次启动随机生成的访问令牌。"),
       el("li", {}, "外部流量仅两处：头像走 QQ 公开 CDN；开启 AI 总结时消息文本会发送到你配置的 LLM 服务。")));
 
-  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, aboutCard);
+  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, scheduleCard, aboutCard);
+};
+
+const renderScheduleCard = () => {
+  const schedule = settingsState.schedule;
+  const msg = el("span", { style: "font-size:13px" });
+  const timeInput = el("input", { type: "time", value: schedule?.time || "09:00", style: "width:120px" });
+
+  const refresh = async () => {
+    try {
+      settingsState.schedule = await api("/api/schedule");
+    } catch {
+      settingsState.schedule = { enabled: false };
+    }
+    renderSettingsView();
+  };
+
+  const statusLine = schedule === null
+    ? el("span", { class: "card-sub" }, "正在读取…")
+    : schedule.enabled
+      ? el("span", {}, savedTag(true), el("span", { style: "margin-left:8px;font-size:13px" },
+          `每天 ${schedule.time} 自动总结关注群${schedule.lastRun ? `（上次运行 ${schedule.lastRun}）` : ""}`))
+      : savedTag(false);
+
+  return el("div", { class: "card" },
+    el("h2", {}, "定时总结"),
+    el("p", { class: "card-sub" },
+      "用 Windows 计划任务每天定点自动总结「关注群」。它独立运行，不需要控制台开着；" +
+      "如果到点时电脑关机或睡眠，开机后会自动补跑这次（不会静默跳过）。"),
+    el("div", { class: "row", style: "margin-bottom:10px" }, statusLine),
+    el("div", { class: "row" },
+      el("span", { style: "font-size:13px" }, "每天"),
+      timeInput,
+      el("button", {
+        class: "btn small primary",
+        onclick: async (event) => {
+          event.target.disabled = true;
+          try {
+            await api("/api/schedule", { method: "POST", body: JSON.stringify({ enabled: true, time: timeInput.value, sinceHours: 26 }) });
+            settingsFeedback(msg, "已设置。", false);
+            await refresh();
+            return;
+          } catch (error) {
+            settingsFeedback(msg, error.message, true);
+          }
+          event.target.disabled = false;
+        },
+      }, schedule?.enabled ? "更新时间" : "开启定时"),
+      schedule?.enabled
+        ? el("button", {
+            class: "btn small",
+            onclick: async () => {
+              try {
+                await api("/api/schedule/run-now", { method: "POST" });
+                settingsFeedback(msg, "已触发一次运行（后台执行）。", false);
+              } catch (error) {
+                settingsFeedback(msg, error.message, true);
+              }
+            },
+          }, "立即运行一次")
+        : null,
+      schedule?.enabled
+        ? el("button", {
+            class: "btn small danger",
+            onclick: async () => {
+              try {
+                await api("/api/schedule", { method: "POST", body: JSON.stringify({ enabled: false }) });
+                settingsFeedback(msg, "已关闭定时。", false);
+                await refresh();
+              } catch (error) {
+                settingsFeedback(msg, error.message, true);
+              }
+            },
+          }, "关闭")
+        : null,
+      msg));
 };

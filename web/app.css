@@ -275,7 +275,7 @@ details.topic summary:hover { color: var(--accent); }
 .search-box { width: 100%; margin-bottom: 10px; }
 
 /* ---- messages ---- */
-.msg-list { max-height: 68vh; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; background: var(--panel); }
+.msg-list { height: calc(100vh - 250px); min-height: 340px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 4px 12px; background: var(--panel); }
 .msg-row { display: flex; gap: 10px; padding: 5px 2px; font-size: 13px; line-height: 1.5; border-radius: 6px; align-items: baseline; }
 .msg-row:hover { background: var(--bg); }
 .msg-row time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; flex: none; }
@@ -367,16 +367,35 @@ details.topic summary:hover { color: var(--accent); }
 
 /* ---- chat (Telegram-like bubbles) ---- */
 .chat-head { position: relative; z-index: 3; }
+.chat-wrap { position: relative; }
 .chat-list {
-  max-height: 66vh;
+  height: calc(100vh - 250px);
+  min-height: 340px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg);
-  padding: 12px 16px;
+  padding: 12px 24px;
 }
+.to-bottom {
+  position: absolute;
+  right: 22px;
+  bottom: 18px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
+  transition: border-color var(--dur), color var(--dur);
+}
+.to-bottom:hover { border-color: var(--accent); color: var(--accent); }
 .bubble-group { display: flex; gap: 10px; margin: 10px 0; align-items: flex-start; }
-.bg-col { min-width: 0; max-width: 78%; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.bg-col { min-width: 0; max-width: 720px; display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
 .bg-head { font-size: 12px; font-weight: 650; color: var(--muted); padding-left: 4px; }
 .bg-head time { font-weight: 400; margin-left: 8px; font-variant-numeric: tabular-nums; }
 .bubble {

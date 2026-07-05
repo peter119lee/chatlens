@@ -546,6 +546,58 @@ const chatRangeChips = () => {
     }));
 };
 
+// Jump the chat to a typed date/time: load a window around it and scroll it into view.
+const jumpToTime = async (text) => {
+  const target = hktToUnix(text);
+  if (target === null) {
+    alert("时间格式：2026-07-04 或 2026-07-04 14:30");
+    return;
+  }
+  const msg = app.msg;
+  msg.rangeKey = "jump";
+  msg.from = target - 900;
+  msg.to = null;
+  msg.items = [];
+  msg.selA = null;
+  msg.selB = null;
+  msg.scrollToTime = target;
+  renderMessagesView();
+  try {
+    await loadMessages(true);
+  } catch (error) {
+    alert(error.message);
+  }
+  renderMessagesView();
+};
+
+// Late-loading images near the bottom change scrollHeight after we scroll, so
+// re-pin a few times as layout settles instead of a single scrollTop assignment.
+const pinToBottom = () => {
+  for (const delay of [0, 120, 350, 700]) {
+    setTimeout(() => {
+      const list = document.querySelector(".chat-scroll");
+      if (list !== null) {
+        list.scrollTop = list.scrollHeight;
+      }
+    }, delay);
+  }
+};
+
+// Reach the newest message: page forward until there is no more, then pin to bottom.
+const goToLatest = async () => {
+  let guard = 0;
+  while (app.msg.hasMore && guard < 20) {
+    guard += 1;
+    try {
+      await loadMessages(false);
+    } catch {
+      break;
+    }
+  }
+  renderMessagesView();
+  pinToBottom();
+};
+
 const renderChat = () => {
   const msg = app.msg;
   const listNodes = buildChatNodes();
@@ -576,9 +628,15 @@ const renderChat = () => {
       chatRangeChips(),
       el("input", {
         type: "text",
+        placeholder: "跳到时间 例如 2026-07-04 14:30",
+        style: "width:220px",
+        onchange: (event) => jumpToTime(event.target.value.trim()),
+      }),
+      el("input", {
+        type: "text",
         placeholder: "搜索关键词或发言人…",
         value: msg.q,
-        style: "width:200px;margin-left:auto",
+        style: "width:180px;margin-left:auto",
         onchange: async (event) => {
           msg.q = event.target.value;
           msg.items = [];
@@ -602,16 +660,23 @@ const renderChat = () => {
         el("button", { class: "btn small primary", onclick: summarizeSelection, disabled: app.msg.selB === null && app.msg.selA === null }, "🧠 总结所选"),
         el("button", { class: "btn small", onclick: clearSelection }, "取消"));
 
-  setChildren($("#view-messages"), header, list, selectionBar);
+  const toBottom = el("button", { class: "to-bottom", title: "回到最新", onclick: goToLatest }, "⤓");
+
+  setChildren($("#view-messages"), header, el("div", { class: "chat-wrap" }, list, toBottom), selectionBar);
   setupChatObservers(list);
 
-  if (msg.scrollToUnread) {
+  if (msg.scrollToTime != null) {
+    const targetTime = msg.scrollToTime;
+    msg.scrollToTime = null;
+    const hit = [...list.querySelectorAll("[data-sentat]")].find((node) => Number(node.dataset.sentat) >= targetTime);
+    (hit ?? list.querySelector("[data-sentat]"))?.scrollIntoView({ block: "start" });
+  } else if (msg.scrollToUnread) {
     msg.scrollToUnread = false;
     const divider = list.querySelector("#unread-divider");
     if (divider !== null) {
       divider.scrollIntoView({ block: "center" });
     } else {
-      list.scrollTop = list.scrollHeight;
+      pinToBottom();
     }
   }
 };
