@@ -47,7 +47,12 @@ const latestMtime = (dirPath) => {
     const entries = fs.readdirSync(current, { withFileTypes: true });
     for (const entry of entries) {
       const entryPath = path.join(current, entry.name);
-      const stat = fs.statSync(entryPath);
+      let stat;
+      try {
+        stat = fs.statSync(entryPath);
+      } catch {
+        continue;
+      }
       latest = Math.max(latest, stat.mtimeMs);
       if (entry.isDirectory()) {
         stack.push(entryPath);
@@ -108,7 +113,17 @@ const summarizeTopics = (analysis) => {
     .join(" / ") || "No summary";
 };
 
+// A run left behind with truncated/corrupt JSON must not take down the whole listing.
 const collectRun = (runDir, reportsDir) => {
+  try {
+    return collectRunUnsafe(runDir, reportsDir);
+  } catch (error) {
+    console.error(`run-index: skipping unreadable run ${path.basename(runDir)}: ${error.message}`);
+    return null;
+  }
+};
+
+const collectRunUnsafe = (runDir, reportsDir) => {
   const runId = path.basename(runDir);
   const analysisPath = path.join(runDir, "analysis", "analysis.json");
   if (!pathExists(analysisPath)) {

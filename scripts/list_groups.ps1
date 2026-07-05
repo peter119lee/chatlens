@@ -34,11 +34,17 @@ try {
     Push-Location $toolRoot
     try {
         npm run prepare-clean-dbs -- -NtDbDir ([string]$config.ntDbDir) -RunDir $runDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "prepare-clean-dbs failed. ExitCode=$LASTEXITCODE"
+        }
     } finally {
         Pop-Location
     }
 
     node (Join-Path $toolRoot 'src\list_groups.js') (Join-Path $runDir 'clean-db\group_info.clean.db') $actualOutputPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "list_groups.js failed. ExitCode=$LASTEXITCODE"
+    }
     Write-Output ""
     Write-Output "runDir=$runDir"
     Write-Output "groupListPath=$actualOutputPath"

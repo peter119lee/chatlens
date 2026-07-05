@@ -197,7 +197,9 @@ const postReadMark = async (body) => {
     const group = app.msg.overview.groups.find((entry) => entry.groupId === app.msg.groupId);
     if (group !== undefined && result.readMark !== null) {
       group.readMark = result.readMark;
-      group.unreadCount = app.msg.items.filter((item) => item.sentAt > result.readMark.sentAt).length;
+      // unreadCount refreshes with the next store-overview fetch (returning to the
+      // inbox refetches it); recounting only loaded items here undercounts and
+      // ignores the server's same-second row_id tie-break.
     }
   }
 };
@@ -600,6 +602,9 @@ const goToLatest = async () => {
 
 const renderChat = () => {
   const msg = app.msg;
+  // Rebuilding the list resets scroll to the top; remember where the reader was
+  // so selection clicks and style/icon toggles don't jump the chat away.
+  const previousScrollTop = document.querySelector(".chat-scroll")?.scrollTop ?? 0;
   const listNodes = buildChatNodes();
 
   const list = el("div", { class: `chat-scroll ${msg.style === "compact" ? "msg-list" : "chat-list"}` },
@@ -678,6 +683,8 @@ const renderChat = () => {
     } else {
       pinToBottom();
     }
+  } else if (previousScrollTop > 0) {
+    list.scrollTop = previousScrollTop;
   }
 };
 

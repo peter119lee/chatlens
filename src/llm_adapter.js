@@ -346,12 +346,13 @@ const normalizeLlmSummary = (rawSummary, provider) => ({
   generatedAt: new Date().toISOString(),
   summary: requiredString(rawSummary.summary, "summary"),
   topics: requiredArray(rawSummary.topics, "topics").map(normalizeTopic),
-  // timeline/uncategorized are newer schema fields; tolerate models that omit them.
-  timeline: (rawSummary.timeline ?? []).map(normalizeTimelineItem),
-  uncategorized: (rawSummary.uncategorized ?? []).map(normalizeUncategorizedItem),
-  actions: requiredArray(rawSummary.actions, "actions").map(normalizeAction),
-  risks: requiredArray(rawSummary.risks, "risks").map(normalizeRisk),
-  links: requiredArray(rawSummary.links, "links").map(normalizeLink),
+  // Every list except topics is optional: tolerate models that omit fields
+  // from older or partial schema responses.
+  timeline: requiredArray(rawSummary.timeline ?? [], "timeline").map(normalizeTimelineItem),
+  uncategorized: requiredArray(rawSummary.uncategorized ?? [], "uncategorized").map(normalizeUncategorizedItem),
+  actions: requiredArray(rawSummary.actions ?? [], "actions").map(normalizeAction),
+  risks: requiredArray(rawSummary.risks ?? [], "risks").map(normalizeRisk),
+  links: requiredArray(rawSummary.links ?? [], "links").map(normalizeLink),
   announcementDraft: optionalString(rawSummary.announcementDraft, "announcementDraft"),
 });
 

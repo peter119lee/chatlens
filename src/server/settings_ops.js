@@ -3,6 +3,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const state = require("./toolkit_state");
+const { quotePs } = require("./run_jobs");
 
 const SECRET_DIR = path.join(process.env.APPDATA ?? "", "QQSummaryTools");
 const SECRET_FILES = {
@@ -11,6 +12,10 @@ const SECRET_FILES = {
 };
 const BASE_URL_PATTERN = /^https?:\/\/[\w.-]+(?::\d+)?(?:\/[\w./-]*)?$/u;
 const MODEL_NAME_PATTERN = /^[\w.:/-]{1,64}$/u;
+// Absolute Windows directory without quote-breaking or illegal path characters —
+// these values later travel through PowerShell/npm command lines.
+const WINDOWS_DIR_PATTERN = /^[A-Za-z]:[\\/][^"<>|]*$/u;
+const hasControlChar = (value) => [...String(value)].some((ch) => ch.codePointAt(0) < 32);
 
 const runPowershell = (commandText, stdinText) =>
   new Promise((resolve, reject) => {
@@ -82,10 +87,13 @@ const saveSecret = async (which, secretValue) => {
 
 // Lists model ids from any OpenAI-compatible endpoint. The API key stays inside
 // the PowerShell process (read from DPAPI); only model ids come back on stdout.
-const fetchLlmModels = async (baseUrl) => {
-  const trimmed = String(baseUrl ?? "").trim().replace(/\/+$/u, "");
+// Always fetches from the base URL already persisted in config: the stored key
+// must never be sent to a caller-supplied URL.
+const fetchLlmModels = async () => {
+  const config = state.loadConfig();
+  const trimmed = String(config.llm?.baseUrl ?? "").trim().replace(/\/+$/u, "");
   if (!BASE_URL_PATTERN.test(trimmed)) {
-    throw new Error("baseUrl 格式不对，应类似 https://api.deepseek.com");
+    throw new Error("先保存 LLM 配置（API 地址），再获取模型列表。");
   }
   if (!fs.existsSync(path.join(SECRET_DIR, SECRET_FILES.llmKey))) {
     throw new Error("先在上方保存 LLM API key，再获取模型列表。");
@@ -95,7 +103,7 @@ const fetchLlmModels = async (baseUrl) => {
   const command = [
     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "$ErrorActionPreference = 'Stop'",
-    `. '${commonPs}'`,
+    `. ${quotePs(commonPs)}`,
     "$key = Read-SavedSecret -FileName 'deepseek-api-key.dpapi' -SecretName 'LLM API key'",
     `$resp = Invoke-RestMethod -Uri '${trimmed}/models' -Headers @{ Authorization = \"Bearer $key\" } -TimeoutSec 30`,
     "$items = if ($null -ne $resp.PSObject.Properties['data']) { $resp.data } else { $resp }",
@@ -113,24 +121,27 @@ const fetchLlmModels = async (baseUrl) => {
   return models;
 };
 
+// Patch against the raw on-disk config and write atomically (via toolkit_state)
+// so relative dirs stay relative and concurrent readers never see a torn file.
 const saveConfigPatch = (patch) => {
-  const config = state.loadConfig();
-  const next = { ...config, ...patch };
-  fs.writeFileSync(state.configPath, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  state.writeConfig({ ...state.loadRawConfig(), ...patch });
 };
 
 const saveLlmConfig = ({ baseUrl, model }) => {
   const trimmedUrl = String(baseUrl ?? "").trim().replace(/\/+$/u, "");
   const trimmedModel = String(model ?? "").trim();
   if (!BASE_URL_PATTERN.test(trimmedUrl)) {
-    throw new Error("baseUrl 格式不对。");
+    throw new Error("baseUrl 格式不对，应类似 https://api.deepseek.com");
   }
-  if (!MODEL_NAME_PATTERN.test(trimmedModel)) {
+  const config = state.loadRawConfig();
+  // An empty model keeps the previously saved one, so the base URL can be
+  // saved (and models listed) before a model has been picked.
+  const nextModel = trimmedModel.length > 0 ? trimmedModel : String(config.llm?.model ?? "");
+  if (nextModel.length > 0 && !MODEL_NAME_PATTERN.test(nextModel)) {
     throw new Error("模型名格式不对。");
   }
-  const config = state.loadConfig();
-  saveConfigPatch({ llm: { ...(config.llm ?? {}), provider: "deepseek", baseUrl: trimmedUrl, model: trimmedModel } });
-  return { baseUrl: trimmedUrl, model: trimmedModel };
+  saveConfigPatch({ llm: { ...(config.llm ?? {}), provider: "deepseek", baseUrl: trimmedUrl, model: nextModel } });
+  return { baseUrl: trimmedUrl, model: nextModel };
 };
 
 const saveQqPaths = ({ ntDbDir, ntDataDir }) => {
@@ -138,6 +149,12 @@ const saveQqPaths = ({ ntDbDir, ntDataDir }) => {
   const dataDir = String(ntDataDir ?? "").trim();
   if (dbDir.length === 0) {
     throw new Error("nt_db 目录不能为空。");
+  }
+  if (!WINDOWS_DIR_PATTERN.test(dbDir) || hasControlChar(dbDir)) {
+    throw new Error("nt_db 目录应为绝对路径（例如 C:\\...\\nt_qq\\nt_db），且不能包含 \" < > | 字符。");
+  }
+  if (dataDir.length > 0 && (!WINDOWS_DIR_PATTERN.test(dataDir) || hasControlChar(dataDir))) {
+    throw new Error("nt_data 目录应为绝对路径，且不能包含 \" < > | 字符。");
   }
   saveConfigPatch({ ntDbDir: dbDir, ntDataDir: dataDir });
   return {

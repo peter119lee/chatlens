@@ -255,12 +255,12 @@ const exportMessages = (args, key) => {
   }
 
   const db = openDatabase(args.databasePath, key);
-  const memberNamesByGroup = new Map(
-    args.groupIds.map((groupId) => [groupId, fetchGroupMemberNames(args.groupInfoDatabasePath, key, groupId)]),
-  );
-  const groupNames = fetchGroupNames(args.groupInfoDatabasePath, key, args.groupIds);
-
   try {
+    const memberNamesByGroup = new Map(
+      args.groupIds.map((groupId) => [groupId, fetchGroupMemberNames(args.groupInfoDatabasePath, key, groupId)]),
+    );
+    const groupNames = fetchGroupNames(args.groupInfoDatabasePath, key, args.groupIds);
+
     db.defaultSafeIntegers(true);
     const stmt = db.prepare(
       [
@@ -291,6 +291,7 @@ const exportMessages = (args, key) => {
     const startUnix = BigInt(args.startUnix);
     const endUnix = BigInt(args.endUnix);
     const chunkSize = 1000;
+    const maxQueryErrors = 50;
     let cursor = 9223372036854775807n;
     let scanned = 0;
     const messages = [];
@@ -307,6 +308,12 @@ const exportMessages = (args, key) => {
           message: error.message,
           code: error.code,
         });
+        // A torn/corrupt copy can fail on every page; without a budget this
+        // retry loop would shrink the cursor ~9 million times before exiting.
+        if (errors.length >= maxQueryErrors) {
+          errors.push({ cursor: cursor.toString(), message: `Aborted scan after ${maxQueryErrors} query errors.`, code: "SCAN_ABORTED" });
+          break;
+        }
         cursor -= 1000000000000n;
         continue;
       }

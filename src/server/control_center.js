@@ -287,8 +287,7 @@ const handleApi = async (request, response, url) => {
     }
 
     if (request.method === "POST" && url.pathname === "/api/llm/models") {
-      const body = await readBody(request);
-      sendJson(response, 200, { models: await settings.fetchLlmModels(body.baseUrl) });
+      sendJson(response, 200, { models: await settings.fetchLlmModels() });
       return;
     }
 

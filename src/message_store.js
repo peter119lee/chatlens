@@ -269,6 +269,7 @@ const setReadMark = (db, groupId, sentAt, rowId) => {
     ON CONFLICT(group_id) DO UPDATE
       SET sent_at = excluded.sent_at, row_id = excluded.row_id, updated_at = excluded.updated_at
       WHERE excluded.sent_at > read_marks.sent_at
+         OR (excluded.sent_at = read_marks.sent_at AND excluded.row_id > read_marks.row_id)
   `).run(String(groupId), sentAt, rowId ?? "", Math.floor(Date.now() / 1000));
 };
 

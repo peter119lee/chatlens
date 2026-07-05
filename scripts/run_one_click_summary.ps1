@@ -217,18 +217,18 @@ function Get-LlmOptions {
     $maxMessagesConfig = $llmConfig.PSObject.Properties['maxMessages']
     $maxCharsConfig = $llmConfig.PSObject.Properties['maxChars']
 
-    $provider = if ([string]::IsNullOrWhiteSpace($RawProvider)) { [string]$providerConfig.Value } else { $RawProvider }
+    $provider = if (-not [string]::IsNullOrWhiteSpace($RawProvider)) { $RawProvider } elseif ($null -ne $providerConfig) { [string]$providerConfig.Value } else { '' }
     if ([string]::IsNullOrWhiteSpace($provider)) {
         throw 'LLM provider is required when UseLlm is set.'
     }
 
     switch ($provider) {
         'deepseek' {
-            $baseUrl = if ([string]::IsNullOrWhiteSpace($RawBaseUrl)) { [string]$baseUrlConfig.Value } else { $RawBaseUrl }
-            $model = if ([string]::IsNullOrWhiteSpace($RawModel)) { [string]$modelConfig.Value } else { $RawModel }
+            $baseUrl = if (-not [string]::IsNullOrWhiteSpace($RawBaseUrl)) { $RawBaseUrl } elseif ($null -ne $baseUrlConfig) { [string]$baseUrlConfig.Value } else { '' }
+            $model = if (-not [string]::IsNullOrWhiteSpace($RawModel)) { $RawModel } elseif ($null -ne $modelConfig) { [string]$modelConfig.Value } else { '' }
             $apiKeyEnv = if ($null -eq $apiKeyEnvConfig -or [string]::IsNullOrWhiteSpace([string]$apiKeyEnvConfig.Value)) { 'DEEPSEEK_API_KEY' } else { [string]$apiKeyEnvConfig.Value }
-            $maxMessages = if ($RawMaxMessages -gt 0) { $RawMaxMessages } else { [int]$maxMessagesConfig.Value }
-            $maxChars = if ($RawMaxChars -gt 0) { $RawMaxChars } else { [int]$maxCharsConfig.Value }
+            $maxMessages = if ($RawMaxMessages -gt 0) { $RawMaxMessages } elseif ($null -ne $maxMessagesConfig) { [int]$maxMessagesConfig.Value } else { 400 }
+            $maxChars = if ($RawMaxChars -gt 0) { $RawMaxChars } elseif ($null -ne $maxCharsConfig) { [int]$maxCharsConfig.Value } else { 50000 }
 
             if ([string]::IsNullOrWhiteSpace($baseUrl)) {
                 throw 'LLM baseUrl is required for provider deepseek.'

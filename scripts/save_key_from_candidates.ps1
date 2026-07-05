@@ -23,10 +23,8 @@ $actualConfigPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 }
 
 $config = Read-ToolkitConfig -Path $actualConfigPath
-$defaultCandidatePath = 'C:\Users\User\Documents\Codex\2026-07-02\i-a\work\qq-summarizer\data\memory-candidates.txt'
-$defaultCleanDatabasePath = 'C:\Users\User\Documents\Codex\2026-07-02\i-a\work\qq-summarizer\data\nt_msg.clean.db'
 $actualCandidatePath = if ([string]::IsNullOrWhiteSpace($CandidatePath)) {
-    $defaultCandidatePath
+    throw 'Pass -CandidatePath <memory-candidates.txt> (a key-candidate dump from a memory scan). If you already know the key, use save_key.ps1 option 2 or the web console settings page instead.'
 } else {
     $CandidatePath
 }
@@ -36,7 +34,7 @@ if (-not (Test-Path -LiteralPath $actualCandidatePath)) {
 }
 
 $actualDatabasePath = if ([string]::IsNullOrWhiteSpace($DatabasePath)) {
-    $defaultCleanDatabasePath
+    throw 'Pass -DatabasePath <nt_msg.clean.db> (create one with prepare_clean_dbs.ps1 first).'
 } else {
     $DatabasePath
 }

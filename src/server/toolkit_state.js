@@ -10,12 +10,16 @@ const configExamplePath = path.join(toolRoot, "config", "defaults.example.json")
 const storeDbPath = path.join(toolRoot, "store", "messages.db");
 
 // First run on a fresh clone: bootstrap the local config from the tracked template.
-// Relative dirs in the template resolve against the toolkit root, not the cwd.
-const loadConfig = () => {
+const loadRawConfig = () => {
   if (!fs.existsSync(configPath) && fs.existsSync(configExamplePath)) {
     fs.copyFileSync(configExamplePath, configPath);
   }
-  const config = readJson(configPath);
+  return readJson(configPath);
+};
+
+// Relative dirs in the template resolve against the toolkit root, not the cwd.
+const loadConfig = () => {
+  const config = loadRawConfig();
   for (const key of ["runsDir", "reportsDir"]) {
     if (typeof config[key] === "string" && config[key].length > 0 && !path.isAbsolute(config[key])) {
       config[key] = path.join(toolRoot, config[key]);
@@ -41,10 +45,19 @@ const normalizeWatchlist = (config) =>
     )
     .filter((entry) => /^\d+$/u.test(entry.groupId));
 
+// Persist against the raw on-disk shape (loadConfig absolutizes runsDir/reportsDir
+// in memory — writing that back would bake machine paths into the config), and
+// swap in atomically so a concurrent reader never sees a half-written file.
+const writeConfig = (config) => {
+  const tmpPath = `${configPath}.tmp-${process.pid}`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  fs.renameSync(tmpPath, configPath);
+};
+
 const saveWatchlist = (entries) => {
-  const config = loadConfig();
+  const config = loadRawConfig();
   config.watchlist = entries.map((entry) => ({ groupId: entry.groupId, name: entry.name }));
-  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  writeConfig(config);
 };
 
 const getKnownGroups = (config) => {
@@ -494,6 +507,8 @@ module.exports = {
   toolRoot,
   configPath,
   loadConfig,
+  loadRawConfig,
+  writeConfig,
   getState,
   updateWatchlist,
   getRunDetail,

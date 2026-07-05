@@ -2,10 +2,12 @@
 
 /* ---------- settings view: QQ paths, keys, LLM config ---------- */
 
-const settingsState = { status: null, models: [], schedule: null };
+const settingsState = { status: null, models: [], schedule: null, llmDraft: null, llmNotice: null };
 
 const openSettingsView = async () => {
   showView("settings");
+  settingsState.llmDraft = null;
+  settingsState.llmNotice = null;
   renderSettingsView();
   try {
     settingsState.status = await api("/api/settings");
@@ -87,9 +89,10 @@ const renderSettingsView = () => {
   const keyRow = (label, which, isSaved, hint) => {
     const input = el("input", { type: "password", placeholder: isSaved ? "已保存 — 粘贴新值可覆盖" : "粘贴后点保存", style: "flex:1;min-width:220px" });
     const msg = el("span", { style: "font-size:13px" });
+    const tag = savedTag(isSaved);
     return el("div", { style: "margin-bottom:14px" },
       el("div", { class: "row", style: "margin-bottom:6px" },
-        el("strong", {}, label), savedTag(isSaved)),
+        el("strong", {}, label), tag),
       hint,
       el("div", { class: "row" },
         input,
@@ -107,6 +110,9 @@ const renderSettingsView = () => {
               input.value = "";
               settingsFeedback(msg, "已加密保存（DPAPI，只有当前 Windows 用户能解密）。", false);
               settingsState.status = await api("/api/settings");
+              // Update the tag in place — a full re-render would wipe this feedback line.
+              tag.textContent = "✓ 已保存";
+              tag.className = "tag";
             } catch (error) {
               settingsFeedback(msg, error.message, true);
             }
@@ -129,15 +135,36 @@ const renderSettingsView = () => {
         "任何 OpenAI 兼容服务的 key 都行（DeepSeek / OpenAI / 本地 Ollama 等）。不保存则只用本地统计，不做 AI 总结。")));
 
   /* --- LLM config --- */
-  const urlInput = el("input", { type: "text", value: status.llm.baseUrl, placeholder: "https://api.deepseek.com", style: "width:280px" });
-  const modelInput = el("input", { type: "text", value: status.llm.model, placeholder: "模型名，例如 deepseek-v4-flash", style: "width:240px" });
+  // Inputs read from a draft so re-renders (model chips, schedule refresh)
+  // never clobber values the user is still typing.
+  const draft = settingsState.llmDraft ?? {};
+  const draftPatch = (patch) => {
+    settingsState.llmDraft = { ...(settingsState.llmDraft ?? {}), ...patch };
+  };
+  const urlInput = el("input", {
+    type: "text",
+    value: draft.baseUrl ?? status.llm.baseUrl,
+    placeholder: "https://api.deepseek.com",
+    style: "width:280px",
+    oninput: (event) => draftPatch({ baseUrl: event.target.value }),
+  });
+  const modelInput = el("input", {
+    type: "text",
+    value: draft.model ?? status.llm.model,
+    placeholder: "模型名，例如 deepseek-v4-flash",
+    style: "width:240px",
+    oninput: (event) => draftPatch({ model: event.target.value }),
+  });
   const llmMsg = el("span", { style: "font-size:13px" });
+  if (settingsState.llmNotice !== null) {
+    settingsFeedback(llmMsg, settingsState.llmNotice.text, settingsState.llmNotice.isError);
+  }
   const modelChips = el("div", { class: "chips", style: "margin-top:10px" },
     settingsState.models.map((model) =>
       el("button", {
         class: `chip ${modelInput.value === model ? "on" : ""}`,
         onclick: () => {
-          modelInput.value = model;
+          draftPatch({ model });
           renderSettingsView();
         },
       }, model)));
@@ -154,9 +181,16 @@ const renderSettingsView = () => {
           button.disabled = true;
           settingsFeedback(llmMsg, "正在获取模型列表…", false);
           try {
-            const result = await api("/api/llm/models", { method: "POST", body: JSON.stringify({ baseUrl: urlInput.value }) });
+            // Save the base URL first: the server only sends the stored API key
+            // to the saved provider, never to a caller-supplied URL.
+            await api("/api/settings/llm", {
+              method: "POST",
+              body: JSON.stringify({ baseUrl: urlInput.value, model: modelInput.value }),
+            });
+            settingsState.status = await api("/api/settings");
+            const result = await api("/api/llm/models", { method: "POST" });
             settingsState.models = result.models;
-            settingsFeedback(llmMsg, `取到 ${result.models.length} 个模型，点选即可填入。`, false);
+            settingsState.llmNotice = { text: `取到 ${result.models.length} 个模型，点选即可填入。`, isError: false };
             renderSettingsView();
             return;
           } catch (error) {
@@ -173,7 +207,9 @@ const renderSettingsView = () => {
               method: "POST",
               body: JSON.stringify({ baseUrl: urlInput.value, model: modelInput.value }),
             });
-            settingsFeedback(llmMsg, `已保存：${result.model}`, false);
+            settingsState.llmDraft = null;
+            settingsState.llmNotice = null;
+            settingsFeedback(llmMsg, `已保存：${result.model.length > 0 ? result.model : "（未选模型）"}`, false);
             settingsState.status = await api("/api/settings");
           } catch (error) {
             settingsFeedback(llmMsg, error.message, true);

@@ -178,10 +178,16 @@ const formatBytes = (bytes) => {
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 };
 
+// Every hkt string produced by the pipeline (reports, media index, deep links)
+// is rendered in Asia/Hong_Kong (UTC+8, no DST). Use the same fixed offset here:
+// the browser's local zone would shift displayed times and break the
+// groupId|hkt media join on non-UTC+8 machines.
+const HKT_OFFSET_SECONDS = 8 * 3600;
+
 const unixToHkt = (unix) => {
-  const date = new Date(unix * 1000);
+  const date = new Date((unix + HKT_OFFSET_SECONDS) * 1000);
   const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
 };
 
 const hktToUnix = (text) => {
@@ -189,9 +195,7 @@ const hktToUnix = (text) => {
   if (match === null) {
     return null;
   }
-  return Math.floor(
-    new Date(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +(match[6] ?? 0)).getTime() / 1000,
-  );
+  return Math.floor(Date.UTC(+match[1], +match[2] - 1, +match[3], +match[4], +match[5], +(match[6] ?? 0)) / 1000) - HKT_OFFSET_SECONDS;
 };
 
 /* ---------- navigation ---------- */

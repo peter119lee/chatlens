@@ -159,16 +159,16 @@ const renderMediaView = () => {
               `📥 导出原图 (${tab.selected.size})`)
           : null)),
     el("div", { class: "chips", style: "margin-bottom:8px" },
-      mediaChip(tab.group === "all", "全部群", () => setAndRender({ group: "all", person: "all" })),
+      mediaChip(tab.group === "all", "全部群", () => setAndRender({ group: "all", person: "all", selected: new Set() })),
       groupEntries.map(([groupId, name]) =>
-        mediaChip(tab.group === groupId, name, () => setAndRender({ group: groupId, person: "all" })))),
+        mediaChip(tab.group === groupId, name, () => setAndRender({ group: groupId, person: "all", selected: new Set() })))),
     el("div", { class: "chips", style: "margin-bottom:8px" },
-      mediaChip(tab.kind === "all", "全部类型", () => setAndRender({ kind: "all" })),
-      kinds.map((kind) => mediaChip(tab.kind === kind, `${KIND_ICONS[kind] ?? ""} ${KIND_LABELS[kind] ?? kind}`, () => setAndRender({ kind })))),
+      mediaChip(tab.kind === "all", "全部类型", () => setAndRender({ kind: "all", selected: new Set() })),
+      kinds.map((kind) => mediaChip(tab.kind === kind, `${KIND_ICONS[kind] ?? ""} ${KIND_LABELS[kind] ?? kind}`, () => setAndRender({ kind, selected: new Set() })))),
     el("div", { class: "chips", style: "margin-bottom:8px" },
-      mediaChip(tab.person === "all", "全部人", () => setAndRender({ person: "all" })),
+      mediaChip(tab.person === "all", "全部人", () => setAndRender({ person: "all", selected: new Set() })),
       persons.map(([speaker, count]) =>
-        mediaChip(tab.person === speaker, `${speaker} (${count})`, () => setAndRender({ person: speaker })))),
+        mediaChip(tab.person === speaker, `${speaker} (${count})`, () => setAndRender({ person: speaker, selected: new Set() })))),
     el("div", { class: "chips" },
       mediaChip(tab.sort === "time", "按时间", () => setAndRender({ sort: "time" })),
       mediaChip(tab.sort === "size", "按大小", () => setAndRender({ sort: "size" })),

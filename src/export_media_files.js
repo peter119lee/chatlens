@@ -84,7 +84,20 @@ const pickBestCandidate = (candidates, formats) => {
 
   const allowed = formats.length === 0 ? existing : existing.filter((filePath) => formats.includes(getExtension(filePath)));
   const pool = allowed.length > 0 ? allowed : existing;
-  return pool.sort((left, right) => fs.statSync(right).size - fs.statSync(left).size)[0];
+  // Stat each candidate once, tolerating files QQ purges between the exists
+  // check and here.
+  const sized = [];
+  for (const filePath of pool) {
+    try {
+      sized.push({ filePath, size: fs.statSync(filePath).size });
+    } catch {
+      // skip vanished candidate
+    }
+  }
+  if (sized.length === 0) {
+    return null;
+  }
+  return sized.sort((left, right) => right.size - left.size)[0].filePath;
 };
 
 const findSourcePath = (ref, index, formats) => {

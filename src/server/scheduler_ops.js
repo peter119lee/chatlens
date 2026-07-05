@@ -1,6 +1,7 @@
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const state = require("./toolkit_state");
+const { quotePs } = require("./run_jobs");
 
 const TASK_NAME = "QQSummaryToolkit-Digest";
 const TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/u;
@@ -78,7 +79,7 @@ const enableSchedule = async ({ time, sinceHours }) => {
 
   const command = [
     "$ErrorActionPreference = 'Stop'",
-    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '${psArgument}' -WorkingDirectory '${state.toolRoot}'`,
+    `$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ${quotePs(psArgument)} -WorkingDirectory ${quotePs(state.toolRoot)}`,
     `$trigger = New-ScheduledTaskTrigger -Daily -At '${at}'`,
     "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew",
     "$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited",

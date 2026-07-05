@@ -242,22 +242,25 @@ const buildDynamicTopics = (messages) => {
     .sort((left, right) => right.tokenCount - left.tokenCount || right.textLength - left.textLength)
     .map((item) => item.message);
 
+  // rowId keeps same-second duplicate texts (two people sending "1") distinct.
+  const messageKey = (message) =>
+    (message.rowId != null ? `${message.groupId ?? ""}:${message.rowId}` : `${message.sentAt}:${message.text}`);
   const used = new Set();
   const topics = [];
   for (const seed of seedMessages) {
-    if (used.has(seed.id ?? `${seed.sentAt}:${seed.text}`)) {
+    if (used.has(messageKey(seed))) {
       continue;
     }
 
     const items = scoreTopicSeed(seed, messages, importantTokens)
-      .filter((item) => !used.has(item.message.id ?? `${item.message.sentAt}:${item.message.text}`))
+      .filter((item) => !used.has(messageKey(item.message)))
       .slice(0, 80);
     if (items.length < 2) {
       continue;
     }
 
     for (const item of items) {
-      used.add(item.message.id ?? `${item.message.sentAt}:${item.message.text}`);
+      used.add(messageKey(item.message));
     }
 
     topics.push(topicFromItems(`topic-${topics.length + 1}`, getTopicName(items), items));
@@ -266,7 +269,7 @@ const buildDynamicTopics = (messages) => {
     }
   }
 
-  const unmatched = messages.filter((message) => !used.has(message.id ?? `${message.sentAt}:${message.text}`));
+  const unmatched = messages.filter((message) => !used.has(messageKey(message)));
   if (unmatched.length > 0) {
     const fallbackItems = unmatched.map((message) => ({
       message,

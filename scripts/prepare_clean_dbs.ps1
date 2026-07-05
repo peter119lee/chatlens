@@ -24,6 +24,9 @@ function Copy-CleanDb {
     }
 
     node "$PSScriptRoot\..\src\copy_clean_db.js" $SourcePath $TargetPath 1024
+    if ($LASTEXITCODE -ne 0) {
+        throw "copy_clean_db failed. Source=$SourcePath Target=$TargetPath ExitCode=$LASTEXITCODE"
+    }
 }
 
 function Copy-SidecarIfPresent {
