@@ -166,12 +166,19 @@ const saveQqPaths = ({ ntDbDir, ntDataDir }) => {
 };
 
 // Best-effort scan of the default QQNT data locations for this Windows user.
+// QQ defaults to Documents\Tencent Files, but the storage location is
+// user-configurable — also probe <drive>:\Tencent Files on every drive letter
+// (each base plus its nested "Tencent Files\Tencent Files" layout).
 const detectQqPaths = () => {
   const candidates = [];
-  const roots = [
-    path.join(os.homedir(), "Documents", "Tencent Files"),
-    path.join(os.homedir(), "Documents", "Tencent Files", "Tencent Files"),
-  ];
+  const bases = [path.join(os.homedir(), "Documents", "Tencent Files")];
+  for (let code = 67; code <= 90; code += 1) {
+    bases.push(`${String.fromCharCode(code)}:\\Tencent Files`);
+  }
+  const roots = [];
+  for (const base of bases) {
+    roots.push(base, path.join(base, "Tencent Files"));
+  }
   for (const root of roots) {
     if (!fs.existsSync(root)) {
       continue;
