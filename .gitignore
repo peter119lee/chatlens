@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Local user config (bootstrapped from config/defaults.example.json on first run)
+config/defaults.json
+
+# Generated data — never commit chat content, exports, reports, or the message store
+runs/
+reports/
+store/
+
+# Databases and scan artifacts
+*.db
+*.db-wal
+*.db-shm
+memory-candidates.txt
+
+# Secrets / env
+.env
+
+# Internal dev notes (not for the public repo)
+handoff.md
+
+# OS / editor cruft
+Thumbs.db
+Desktop.ini
+.DS_Store

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="cc-token" content="__CC_TOKEN__">
+  <title>QQ 摘要控制台</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand">
+        <span class="brand-mark">QQ</span>
+        <span class="brand-text">摘要控制台</span>
+      </div>
+      <nav id="nav">
+        <button data-view="run" class="active">运行</button>
+        <button data-view="messages">消息</button>
+        <button data-view="history">历史报告</button>
+        <button data-view="media">媒体</button>
+        <button data-view="watchlist">关注群</button>
+        <button data-view="settings">设置</button>
+      </nav>
+      <div class="rail-foot">
+        <div class="settings-row">
+          <button id="theme-toggle" class="btn small">🌙 夜间模式</button>
+          <button id="icons-toggle" class="btn small">图标：开</button>
+        </div>
+        <p>只读本地 QQNT 数据库副本。<br>不发消息，不动原始数据。</p>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <h1 id="view-title">运行</h1>
+        <button id="job-pill" class="job-pill idle" hidden></button>
+      </header>
+      <div id="view-run" class="view"></div>
+      <div id="view-messages" class="view" hidden></div>
+      <div id="view-history" class="view" hidden></div>
+      <div id="view-media" class="view" hidden></div>
+      <div id="view-watchlist" class="view" hidden></div>
+      <div id="view-reader" class="view" hidden></div>
+      <div id="view-settings" class="view" hidden></div>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+  <script src="/reader.js"></script>
+  <script src="/messages.js"></script>
+  <script src="/media.js"></script>
+  <script src="/settings.js"></script>
+</body>
+</html>

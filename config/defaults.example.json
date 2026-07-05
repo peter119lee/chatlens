@@ -1,0 +1,29 @@
+{
+  "ntDbDir": "",
+  "ntDataDir": "",
+  "defaultGroupIds": [],
+  "watchlist": [],
+  "runDefaults": {
+    "sinceHours": 24,
+    "useLlm": true,
+    "exportMedia": true,
+    "openReport": true,
+    "mediaFormats": "jpg,jpeg,png,gif,webp,mp4,mov,avi,mkv"
+  },
+  "store": {
+    "retentionDays": 3
+  },
+  "defaultDays": 7,
+  "defaultScanLimit": 1000000,
+  "runsDir": "runs",
+  "reportsDir": "reports",
+  "timezone": "Asia/Hong_Kong",
+  "llm": {
+    "provider": "deepseek",
+    "baseUrl": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "apiKeyEnv": "DEEPSEEK_API_KEY",
+    "maxMessages": 400,
+    "maxChars": 50000
+  }
+}
