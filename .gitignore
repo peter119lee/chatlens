@@ -9,6 +9,9 @@ runs/
 reports/
 store/
 
+# Release bundle output (scripts/build_bundle.ps1)
+dist/
+
 # Databases and scan artifacts
 *.db
 *.db-wal
