@@ -23,7 +23,7 @@
 ## 安装
 
 ```powershell
-git clone <本仓库>
+git clone https://github.com/peter119lee/chatlens
 cd qqnt-readonly-summary-toolkit
 npm install
 ```
