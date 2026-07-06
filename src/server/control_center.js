@@ -289,6 +289,11 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/settings/keys/auto-detect") {
+      sendJson(response, 200, await settings.autoDetectKey());
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/settings/llm") {
       const body = await readBody(request);
       sendJson(response, 200, settings.saveLlmConfig(body));

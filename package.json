@@ -1,6 +1,6 @@
 {
   "name": "qqnt-readonly-summary-toolkit",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Read-only QQNT message export helpers for local summarization.",
   "private": true,
   "type": "commonjs",
@@ -12,6 +12,7 @@
     "export-media": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/export_media_files.ps1",
     "save-key": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/save_key.ps1",
     "save-key-from-candidates": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/save_key_from_candidates.ps1",
+    "scan-qq-memory-keys": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/scan_qq_memory_keys.ps1",
     "save-llm-key": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/save_llm_key.ps1",
     "report-center": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/open_report_center.ps1",
     "cleanup-generated": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cleanup_generated_data.ps1",

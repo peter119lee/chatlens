@@ -18,7 +18,7 @@ const MODEL_NAME_PATTERN = /^[\w.:/-]{1,64}$/u;
 const WINDOWS_DIR_PATTERN = /^[A-Za-z]:[\\/][^"<>|]*$/u;
 const hasControlChar = (value) => [...String(value)].some((ch) => ch.codePointAt(0) < 32);
 
-const runPowershell = (commandText, stdinText) =>
+const runPowershell = (commandText, stdinText, { timeoutMs } = {}) =>
   new Promise((resolve, reject) => {
     const child = spawn("powershell.exe", [
       "-NoProfile",
@@ -30,10 +30,21 @@ const runPowershell = (commandText, stdinText) =>
 
     let stdout = "";
     let stderr = "";
+    let timer = null;
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill();
+        reject(new Error("PowerShell 执行超时。"));
+      }, timeoutMs);
+    }
     child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
     child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      if (timer) { clearTimeout(timer); }
+      reject(error);
+    });
     child.on("close", (code) => {
+      if (timer) { clearTimeout(timer); }
       if (code === 0) {
         resolve(stdout);
       } else {
@@ -45,6 +56,34 @@ const runPowershell = (commandText, stdinText) =>
       child.stdin.write(stdinText, "utf8");
     }
     child.stdin.end();
+  });
+
+// Runs one of the toolkit's own node scripts with the SAME node binary that is
+// running this server (process.execPath) — so it works in the zero-setup bundle
+// too, where there is no system "node" on PATH. Returns exit code + captured
+// output instead of rejecting, since callers care about non-zero exits.
+const runNodeScript = (scriptPath, args, timeoutMs) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, ...args], { windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    let timer = null;
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        child.kill();
+        reject(new Error("子进程执行超时。"));
+      }, timeoutMs);
+    }
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.on("error", (error) => {
+      if (timer) { clearTimeout(timer); }
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (timer) { clearTimeout(timer); }
+      resolve({ code, stdout, stderr });
+    });
   });
 
 const getSettingsStatus = () => {
@@ -228,10 +267,89 @@ const detectQqPaths = () => {
   return candidates;
 };
 
+// QQNT prepends a 1024-byte fake header ("SQLite header 3\0…") to nt_msg.db;
+// SQLCipher only opens a copy with that prefix stripped.
+const NT_MSG_PREFIX_BYTES = 1024;
+
+// One-click NTQQ key recovery: scan the running QQ process memory for key
+// candidates, then verify each against a throwaway copy of the user's own DB
+// and DPAPI-save the one that decrypts it. This removes the biggest barrier for
+// non-technical users (previously they had to find the 16/32-char key by hand).
+// The key value never leaves the child processes — it is not returned or logged.
+const autoDetectKey = async () => {
+  const config = state.loadConfig();
+  const ntDbDir = String(config.ntDbDir ?? "").trim();
+  if (ntDbDir.length === 0) {
+    throw new Error("请先在上方设置并保存「QQ 数据库路径」（nt_db 目录），再自动获取密钥。");
+  }
+  const sourceDb = path.join(ntDbDir, "nt_msg.db");
+  if (!fs.existsSync(sourceDb)) {
+    throw new Error(`在 nt_db 目录里找不到 nt_msg.db：${ntDbDir}`);
+  }
+
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "qq-autokey-"));
+  const cleanDb = path.join(workDir, "nt_msg.clean.db");
+  const candidatesPath = path.join(workDir, "candidates.txt");
+  try {
+    // 1) Strip the fake header into a temp copy so SQLCipher can open it.
+    //    Copying needs no key; the original QQ database is never modified.
+    const copy = await runNodeScript(
+      path.join(state.toolRoot, "src", "copy_clean_db.js"),
+      [sourceDb, cleanDb, String(NT_MSG_PREFIX_BYTES)],
+      60000,
+    );
+    if (copy.code !== 0) {
+      throw new Error("复制数据库副本失败，无法用来验证密钥。请确认 QQ 数据库路径正确。");
+    }
+
+    // 2) Scan the running QQ process memory for 16/32-char key candidates.
+    const scanScript = path.join(state.toolRoot, "scripts", "scan_qq_memory_keys.ps1");
+    const scanCommand = [
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+      "$ErrorActionPreference = 'Stop'",
+      `& ${quotePs(scanScript)} -OutputPath ${quotePs(candidatesPath)}`,
+      "exit 0",
+    ].join("\n");
+    await runPowershell(scanCommand, undefined, { timeoutMs: 240000 });
+    if (!fs.existsSync(candidatesPath)) {
+      throw new Error("内存扫描没有产生候选。请确认 QQ 已打开并登录后重试。");
+    }
+
+    // 3) Verify candidates against the DB and DPAPI-save the one that works.
+    const secretPath = path.join(SECRET_DIR, SECRET_FILES.ntqqKey);
+    // Memory scans yield tens of thousands of candidates; verifying each one
+    // opens the DB, so on slower machines this can run several minutes.
+    const verify = await runNodeScript(
+      path.join(state.toolRoot, "src", "save_key_from_candidates.js"),
+      [cleanDb, candidatesPath, secretPath],
+      420000,
+    );
+    let result = null;
+    try {
+      result = JSON.parse(verify.stdout);
+    } catch {
+      result = null;
+    }
+    if (result?.saved === true) {
+      return { saved: true, candidateCount: result.candidateCount ?? 0, tested: result.tested ?? 0 };
+    }
+    const scanned = result?.candidateCount ?? 0;
+    throw new Error(`扫描到 ${scanned} 个候选，但没有一个能解开数据库。请确认 QQ 已登录数据库路径对应的账号后重试。`);
+  } finally {
+    // The candidate file holds the real key among the noise — always shred it.
+    try {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+};
+
 module.exports = {
   getSettingsStatus,
   saveStoreConfig,
   saveSecret,
+  autoDetectKey,
   fetchLlmModels,
   saveLlmConfig,
   saveQqPaths,

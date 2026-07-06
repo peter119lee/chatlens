@@ -3,6 +3,9 @@
 /* ---------- settings view: QQ paths, keys, LLM config ---------- */
 
 const settingsState = { status: null, models: [], schedule: null, llmDraft: null, llmNotice: null };
+// One-click NTQQ key recovery lives across re-renders (renderSettingsView rebuilds
+// the whole view), so its busy flag and last notice are kept module-level.
+const autoKeyState = { busy: false, notice: null };
 
 const openSettingsView = async () => {
   showView("settings");
@@ -122,14 +125,45 @@ const renderSettingsView = () => {
         msg));
   };
 
+  const autoKeyMsg = el("span", { style: "font-size:13px" });
+  if (autoKeyState.notice !== null) {
+    settingsFeedback(autoKeyMsg, autoKeyState.notice.text, autoKeyState.notice.isError);
+  }
+  const ntqqKeyHint = el("div", { style: "margin:0 0 8px" },
+    el("p", { class: "card-sub", style: "margin:0 0 8px" },
+      "推荐「自动获取」：打开并登录 QQ 后点下面的按钮，工具会从本机 QQ 进程内存里读出数据库密钥、验证并保存，全程在本机完成，不联网、不改动 QQ 的任何文件。"),
+    el("div", { class: "row" },
+      el("button", {
+        class: "btn small primary",
+        disabled: autoKeyState.busy,
+        onclick: async () => {
+          if (autoKeyState.busy) {
+            return;
+          }
+          autoKeyState.busy = true;
+          autoKeyState.notice = { text: "正在扫描 QQ 内存并验证密钥…（需 QQ 已打开并登录，可能要几分钟，请勿关闭页面）", isError: false };
+          renderSettingsView();
+          try {
+            const result = await api("/api/settings/keys/auto-detect", { method: "POST", body: "{}" });
+            autoKeyState.notice = { text: `✓ 已自动获取并保存密钥（从 ${result.candidateCount} 个候选中命中）。`, isError: false };
+            settingsState.status = await api("/api/settings");
+          } catch (error) {
+            autoKeyState.notice = { text: `自动获取失败：${error.message}`, isError: true };
+          }
+          autoKeyState.busy = false;
+          renderSettingsView();
+        },
+      }, autoKeyState.busy ? "扫描中…" : "🔑 自动获取密钥"),
+      autoKeyMsg),
+    el("p", { class: "card-sub", style: "margin:8px 0 0" },
+      "手动方式（自动获取失败时）：参考开源教程 ",
+      el("a", { href: "https://github.com/QQBackup/qq-win-db-key", target: "_blank", rel: "noopener" }, "QQBackup/qq-win-db-key"),
+      " 拿到 16 位 key 后，粘贴到下面并保存。"));
+
   const keysCard = el("div", { class: "card" },
     el("h2", {}, "密钥"),
     el("p", { class: "card-sub" }, "两把密钥都用 Windows DPAPI 加密存在本机 %APPDATA%\\QQSummaryTools\\，不进项目目录，不进 Git。"),
-    keyRow("NTQQ_DB_KEY（QQ 数据库解密密钥）", "ntqqKey", status.ntqqKeySaved,
-      el("p", { class: "card-sub", style: "margin:0 0 8px" },
-        "获取方法：QQNT 的数据库密钥需要从本机 QQ 进程提取，参考开源教程 ",
-        el("a", { href: "https://github.com/QQBackup/qq-win-db-key", target: "_blank", rel: "noopener" }, "QQBackup/qq-win-db-key"),
-        "（跟随其 Wiki 步骤拿到 16 位 key 后粘贴到这里）。")),
+    keyRow("NTQQ_DB_KEY（QQ 数据库解密密钥）", "ntqqKey", status.ntqqKeySaved, ntqqKeyHint),
     keyRow("LLM API Key（AI 总结用，可选）", "llmKey", status.llmKeySaved,
       el("p", { class: "card-sub", style: "margin:0 0 8px" },
         "任何 OpenAI 兼容服务的 key 都行（DeepSeek / OpenAI / 本地 Ollama 等）。不保存则只用本地统计，不做 AI 总结。")));
