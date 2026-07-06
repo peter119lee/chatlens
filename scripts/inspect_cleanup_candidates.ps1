@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
     [string[]]$Paths,
@@ -11,12 +11,12 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 if (($null -eq $Paths -or $Paths.Count -eq 0) -and [string]::IsNullOrWhiteSpace($PathListFile)) {
-    throw 'Provide either -Paths or -PathListFile.'
+    throw '请传 -Paths 或 -PathListFile。'
 }
 
 $resolvedPaths = if (-not [string]::IsNullOrWhiteSpace($PathListFile)) {
     if (-not (Test-Path -LiteralPath $PathListFile)) {
-        throw "Path list file does not exist: $PathListFile"
+        throw "路径列表文件不存在: $PathListFile"
     }
     Get-Content -LiteralPath $PathListFile | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 } else {

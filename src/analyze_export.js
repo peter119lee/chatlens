@@ -355,10 +355,22 @@ const buildSignalStats = (messages) => {
   };
 };
 
-const buildAnalysisReport = (input, messages, mediaMessages, topics, signalStats) => ({
+const buildAnalysisReport = (input, messages, mediaMessages, topics, signalStats) => {
+  // null coveredFromUnix means the scan covered nothing usable — distinct
+  // from a legacy export that simply lacks the field.
+  const coveredFromUnix = Object.prototype.hasOwnProperty.call(input, "coveredFromUnix")
+    ? input.coveredFromUnix
+    : (input.startUnix ?? null);
+  return {
   groupIds: input.groupIds ?? (input.groupId === undefined ? [] : [input.groupId]),
   groupNames: input.groupNames ?? {},
   scanned: input.scanned,
+  stopReason: input.stopReason ?? null,
+  scanTruncated: input.scanTruncated === true,
+  scanAborted: input.scanAborted === true,
+  queryErrorCount: (input.errors ?? []).length,
+  coveredFromUnix,
+  coveredFromHkt: Number.isFinite(coveredFromUnix) ? formatDateTime(coveredFromUnix) : null,
   matchedRaw: input.matched,
   matchedMediaRaw: input.matchedMedia ?? mediaMessages.length,
   parsedTextMessages: messages.length,
@@ -384,7 +396,8 @@ const buildAnalysisReport = (input, messages, mediaMessages, topics, signalStats
     refs: mediaMessages.reduce((total, message) => total + message.mediaRefs.length, 0),
     byKind: countBy(mediaMessages.flatMap((message) => message.mediaRefs), (ref) => ref.kind),
   },
-});
+  };
+};
 
 const main = () => {
   const args = parseArgs(process.argv);

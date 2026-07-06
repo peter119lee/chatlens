@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
     [string]$ConfigPath,
@@ -41,7 +41,7 @@ function Remove-ChildDirectory {
     $target = (Resolve-Path -LiteralPath $ChildDir).Path
     $expectedPrefix = $parent.TrimEnd('\') + '\'
     if (-not $target.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove directory outside parent. Parent=$parent Target=$target"
+        throw "拒绝删除父目录之外的目录。Parent=$parent Target=$target"
     }
 
     $bytes = Get-DirectoryBytes -Path $target

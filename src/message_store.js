@@ -138,8 +138,16 @@ const ingestExport = (db, exportData, runId, retentionDays) => {
       }).changes;
     }
 
+    // Honest coverage: exports that stopped early (row budget hit / corrupt
+    // copy) carry coveredFromUnix — only the actually-scanned span becomes
+    // coverage, so the missing part can still be re-fetched later. Legacy
+    // exports without the field keep the old whole-window behavior.
+    const hasCoveredField = Object.prototype.hasOwnProperty.call(exportData, "coveredFromUnix");
+    const coveredFrom = hasCoveredField ? exportData.coveredFromUnix : exportData.startUnix;
     for (const groupId of exportData.groupIds ?? []) {
-      insertRange.run(String(groupId), exportData.startUnix, exportData.endUnix, runId ?? "");
+      if (Number.isFinite(coveredFrom) && Number.isFinite(exportData.endUnix) && coveredFrom < exportData.endUnix) {
+        insertRange.run(String(groupId), coveredFrom, exportData.endUnix, runId ?? "");
+      }
       upsertName.run(String(groupId), exportData.groupNames?.[groupId] ?? "");
     }
   });
@@ -150,14 +158,18 @@ const ingestExport = (db, exportData, runId, retentionDays) => {
 };
 
 const pruneStore = (db, retentionDays) => {
-  const days = Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : 3;
+  const days = Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : 30;
   const cutoff = Math.floor(Date.now() / 1000) - days * DAY_SECONDS;
   const prunedMessages = db.prepare("DELETE FROM messages WHERE sent_at < ?").run(cutoff).changes;
   const prunedRanges = db.prepare("DELETE FROM scan_ranges WHERE end_unix < ?").run(cutoff).changes;
-  return { prunedMessages, prunedRanges, cutoff };
+  // Coverage must not keep claiming the pruned span: clamp surviving ranges
+  // that started before the cutoff, otherwise the UI reports "covered" for
+  // messages retention just deleted (the 30-day-scan / 3-day-store trap).
+  const clampedRanges = db.prepare("UPDATE scan_ranges SET start_unix = ? WHERE start_unix < ? AND end_unix >= ?").run(cutoff, cutoff, cutoff).changes;
+  return { prunedMessages, prunedRanges, clampedRanges, cutoff };
 };
 
-const queryMessages = (db, { groupId, fromUnix, toUnix, afterSentAt, afterRowId, limit, search }) => {
+const queryMessages = (db, { groupId, fromUnix, toUnix, afterSentAt, afterRowId, beforeSentAt, beforeRowId, limit, search }) => {
   const conditions = ["group_id = @groupId"];
   const params = { groupId: String(groupId) };
 
@@ -169,7 +181,13 @@ const queryMessages = (db, { groupId, fromUnix, toUnix, afterSentAt, afterRowId,
     conditions.push("sent_at < @toUnix");
     params.toUnix = toUnix;
   }
-  if (Number.isFinite(afterSentAt) && typeof afterRowId === "string" && afterRowId.length > 0) {
+  const pagingBackward = Number.isFinite(beforeSentAt) && typeof beforeRowId === "string" && beforeRowId.length > 0;
+  if (pagingBackward) {
+    // Backward (older) keyset page for the chat's scroll-up loader.
+    conditions.push("(sent_at < @beforeSentAt OR (sent_at = @beforeSentAt AND row_id < @beforeRowId))");
+    params.beforeSentAt = beforeSentAt;
+    params.beforeRowId = beforeRowId;
+  } else if (Number.isFinite(afterSentAt) && typeof afterRowId === "string" && afterRowId.length > 0) {
     conditions.push("(sent_at > @afterSentAt OR (sent_at = @afterSentAt AND row_id > @afterRowId))");
     params.afterSentAt = afterSentAt;
     params.afterRowId = afterRowId;
@@ -180,19 +198,37 @@ const queryMessages = (db, { groupId, fromUnix, toUnix, afterSentAt, afterRowId,
   }
 
   const safeLimit = Number.isInteger(limit) && limit > 0 && limit <= 500 ? limit : 300;
+  const order = pagingBackward ? "DESC" : "ASC";
   const rows = db
     .prepare(`
       SELECT group_id AS groupId, row_id AS rowId, sent_at AS sentAt, speaker, text, is_media AS isMedia, media_kinds AS mediaKinds, speaker_uin AS speakerUin
       FROM messages
       WHERE ${conditions.join(" AND ")}
-      ORDER BY sent_at ASC, row_id ASC
+      ORDER BY sent_at ${order}, row_id ${order}
       LIMIT ${safeLimit + 1}
     `)
     .all(params);
 
+  // hasMore refers to the paged direction (more OLDER rows when paging
+  // backward); backward pages return re-sorted ascending for rendering.
   const hasMore = rows.length > safeLimit;
-  return { messages: rows.slice(0, safeLimit), hasMore };
+  const page = rows.slice(0, safeLimit);
+  if (pagingBackward) {
+    page.reverse();
+  }
+  return { messages: page, hasMore };
 };
+
+// Per-group latest coverage end straight from scan_ranges — unlike
+// getGroupSummaries this also covers groups whose messages were all pruned,
+// so "自上次记录" never silently skips their gap.
+const getCoverageEnds = (db) =>
+  Object.fromEntries(
+    db
+      .prepare("SELECT group_id AS groupId, MAX(end_unix) AS coverageEnd FROM scan_ranges GROUP BY group_id")
+      .all()
+      .map((row) => [row.groupId, row.coverageEnd]),
+  );
 
 const getCoverage = (db, groupId) => {
   const rows = db
@@ -286,6 +322,7 @@ module.exports = {
   pruneStore,
   queryMessages,
   getCoverage,
+  getCoverageEnds,
   getStoredGroups,
   getGroupSummaries,
   getReadMark,

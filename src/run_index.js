@@ -193,6 +193,7 @@ module.exports = {
   pathExists,
   dirSize,
   countManifest,
+  parseRunTimestamp,
   collectRun,
   collectRuns,
 };

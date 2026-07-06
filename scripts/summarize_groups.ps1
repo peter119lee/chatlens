@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$RunDir,
@@ -49,20 +49,20 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\common.ps1"
 
 if ([string]::IsNullOrWhiteSpace($env:NTQQ_DB_KEY)) {
-    throw 'Missing NTQQ_DB_KEY environment variable in this PowerShell session.'
+    throw '缺少 NTQQ_DB_KEY 环境变量。请先在控制台设置页保存 QQ 数据库密钥。'
 }
 
 $groupIds = ConvertTo-GroupIdList -Values @($GroupIdsCsv)
 if (@($groupIds).Length -eq 0) {
-    throw 'At least one QQ group id is required.'
+    throw '至少需要一个 QQ 群号。'
 }
 
 if ($StartUnix -ge $EndUnix) {
-    throw "Invalid time range. StartUnix must be earlier than EndUnix. StartUnix=$StartUnix EndUnix=$EndUnix"
+    throw "时间范围无效：StartUnix 必须早于 EndUnix。StartUnix=$StartUnix EndUnix=$EndUnix"
 }
 
 if ($ScanLimit -le 0) {
-    throw "Invalid ScanLimit. It must be greater than zero. ScanLimit=$ScanLimit"
+    throw "ScanLimit 无效，必须大于 0。ScanLimit=$ScanLimit"
 }
 
 $cleanDir = Join-Path $RunDir 'clean-db'
@@ -83,39 +83,39 @@ node "$PSScriptRoot\..\src\export_group_recent.js" `
     $exportPath `
     $ScanLimit
 if ($LASTEXITCODE -ne 0) {
-    throw "export_group_recent failed. ExitCode=$LASTEXITCODE ExportPath=$exportPath"
+    throw "导出消息失败（ExitCode=$LASTEXITCODE）。ExportPath=$exportPath"
 }
 # progress= lines are machine-readable stage markers for the control-center UI.
 Write-Host "progress=export-done"
 
 if (-not [string]::IsNullOrWhiteSpace($StoreDbPath)) {
-    $retention = if ($StoreRetentionDays -gt 0) { $StoreRetentionDays } else { 3 }
+    $retention = if ($StoreRetentionDays -gt 0) { $StoreRetentionDays } else { 30 }
     $runId = Split-Path $RunDir -Leaf
     node "$PSScriptRoot\..\src\ingest_store.js" $exportPath $StoreDbPath $retention $runId | Out-Host
     if ($LASTEXITCODE -ne 0) {
         # The message store is a convenience cache; a failed ingest should not kill the run.
-        Write-Warning "Message store ingest failed (ExitCode=$LASTEXITCODE). Reports are unaffected."
+        Write-Warning "消息库写入失败（ExitCode=$LASTEXITCODE），「消息」页可能缺这次的数据；报告不受影响。"
     }
     Write-Host "progress=store-done"
 }
 
 node "$PSScriptRoot\..\src\analyze_export.js" $exportPath $analysisDir
 if ($LASTEXITCODE -ne 0) {
-    throw "analyze_export failed. ExitCode=$LASTEXITCODE ExportPath=$exportPath AnalysisDir=$analysisDir"
+    throw "分析消息失败（ExitCode=$LASTEXITCODE）。ExportPath=$exportPath"
 }
 Write-Host "progress=analyze-done"
 
 if ($UseLlm.IsPresent) {
     if ([string]::IsNullOrWhiteSpace($LlmBaseUrl)) {
-        throw 'LlmBaseUrl is required when UseLlm is set.'
+        throw '启用 UseLlm 时必须提供 LlmBaseUrl。'
     }
 
     if ([string]::IsNullOrWhiteSpace($LlmModel)) {
-        throw 'LlmModel is required when UseLlm is set.'
+        throw '启用 UseLlm 时必须提供 LlmModel。'
     }
 
     if ([string]::IsNullOrWhiteSpace($LlmApiKeyEnv)) {
-        throw 'LlmApiKeyEnv is required when UseLlm is set.'
+        throw '启用 UseLlm 时必须提供 LlmApiKeyEnv。'
     }
 }
 
@@ -150,13 +150,13 @@ if (@($groupIds).Length -gt 1) {
 
         node "$PSScriptRoot\..\src\analyze_export.js" $exportPath $groupAnalysisDir $groupId | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw "analyze_export failed for group $groupId. ExitCode=$LASTEXITCODE AnalysisDir=$groupAnalysisDir"
+            throw "分析群 $groupId 失败（ExitCode=$LASTEXITCODE）。AnalysisDir=$groupAnalysisDir"
         }
 
         if ($UseLlm.IsPresent) {
             $llmExitCode = Invoke-LlmAdapter -TargetAnalysisDir $groupAnalysisDir
             if ($llmExitCode -ne 0) {
-                Write-Warning "LLM summary failed for group $groupId (ExitCode=$llmExitCode). The digest will fall back to local topics for this group."
+                Write-Warning "群 $groupId 的 AI 总结失败（ExitCode=$llmExitCode），该群将使用本地分组。"
                 Write-Host "progress=group-llm-failed:$groupId"
             } else {
                 Write-Host "progress=group-llm-done:$groupId"
@@ -170,10 +170,10 @@ if (@($groupIds).Length -gt 1) {
     $llmExitCode = Invoke-LlmAdapter -TargetAnalysisDir $analysisDir
     if ($llmExitCode -ne 0) {
         if ($LlmOptional.IsPresent) {
-            Write-Warning "LLM summary failed (ExitCode=$llmExitCode). The report will fall back to local topics."
+            Write-Warning "AI 总结失败（ExitCode=$llmExitCode），报告将使用本地分组。"
             Write-Host "progress=llm-failed"
         } else {
-            throw "llm_adapter failed. ExitCode=$llmExitCode AnalysisDir=$analysisDir"
+            throw "AI 总结失败（ExitCode=$llmExitCode）。AnalysisDir=$analysisDir"
         }
     } else {
         Write-Host "progress=llm-done"

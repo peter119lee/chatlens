@@ -105,6 +105,25 @@ const loadMediaReport = (analysisJson) => {
   };
 };
 
+// Surfaced prominently: a truncated/aborted scan used to be invisible (raw
+// "扫描行数" only), which read as "the tool lost my messages".
+const scanWarningText = (analysis) => {
+  if (analysis.scanTruncated !== true && analysis.scanAborted !== true) {
+    return null;
+  }
+  const reason = analysis.scanAborted === true ? "数据库副本读取错误过多，扫描提前中止" : "扫描行数达到上限";
+  const missing = analysis.coveredFromHkt ? `早于 ${analysis.coveredFromHkt} 的消息可能缺失` : "请求范围内的消息可能大量缺失";
+  return `${reason}，${missing}。可提高 config\\defaults.json 的 defaultScanLimit，或缩小时间范围后重跑。`;
+};
+
+const llmBasisText = (analysis) => {
+  const lines = analysis.llmSummary?.provider?.messageLines;
+  if (!Number.isFinite(lines) || lines >= (analysis.parsedTextMessages ?? 0)) {
+    return null;
+  }
+  return `AI 摘要基于最近 ${lines} 条文本消息（共 ${analysis.parsedTextMessages} 条）；更早的内容见「本地动态分组」与 messages-clean.txt。`;
+};
+
 const topItems = (items, limit) => items.slice(0, limit).map(([name, count]) => `- ${name}: ${count}`).join("\n");
 
 const keywordItems = (items) =>
@@ -226,10 +245,12 @@ const writeMarkdownReport = (analysis, lines, outputPath, mediaReport) => {
     `- 媒体消息: ${analysis.parsedMediaMessages ?? 0}`,
     `- 原始匹配: ${analysis.matchedRaw}`,
     `- 扫描行数: ${analysis.scanned}`,
+    ...(scanWarningText(analysis) !== null ? ["", `> ⚠ **扫描不完整**：${scanWarningText(analysis)}`] : []),
     "",
     "## LLM 动态摘要",
     "",
     analysis.llmSummary?.summary ?? "- 未启用 LLM；这里只包含本地动态分组和统计。",
+    ...(llmBasisText(analysis) !== null ? ["", `> ℹ ${llmBasisText(analysis)}`] : []),
     "",
     "## LLM 动态主题",
     "",
@@ -468,9 +489,13 @@ const writeHtmlReport = (analysis, outputMarkdown, mediaReport) => {
       <div class="metric"><span>媒体引用</span><strong>${escapeHtml(analysis.mediaSummary?.refs ?? 0)}</strong></div>
       <div class="metric"><span>扫描行数</span><strong>${escapeHtml(analysis.scanned ?? 0)}</strong></div>
     </div>
+    ${scanWarningText(analysis) !== null
+      ? `<section style="border-color:var(--risk)"><h2 style="color:var(--risk)">⚠ 扫描不完整</h2><p>${escapeHtml(scanWarningText(analysis))}</p></section>`
+      : ""}
     <section>
       <h2>LLM 动态摘要</h2>
       <p>${escapeHtml(analysis.llmSummary?.summary ?? "未启用 LLM；这里只包含本地动态分组和统计。")}</p>
+      ${llmBasisText(analysis) !== null ? `<p style="color:var(--muted);font-size:12px">${escapeHtml(llmBasisText(analysis))}</p>` : ""}
     </section>
     <section>
       <h2>LLM 动态主题</h2>

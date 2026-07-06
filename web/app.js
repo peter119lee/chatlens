@@ -71,7 +71,11 @@ const app = {
     q: "",
     items: [],
     hasMore: false,
+    hasOlder: false,
     loading: false,
+    mediaMap: null,
+    mediaRowMap: null,
+    mediaMapAt: 0,
     coverage: [],
     readMark: null,
     dividerAt: null,
@@ -93,8 +97,8 @@ const app = {
 
 const VIEW_TITLES = { run: "运行", messages: "消息", history: "历史报告", media: "媒体", watchlist: "关注群", reader: "阅读报告", settings: "设置" };
 const NAV_ICONS = { run: "▶", messages: "💬", history: "📚", media: "🖼️", watchlist: "⭐", settings: "⚙️" };
-const KIND_ICONS = { image: "📷", video: "🎬", sticker: "😃", face: "😃", file: "📎" };
-const KIND_LABELS = { image: "图片", video: "视频", sticker: "表情", face: "表情", file: "文件" };
+const KIND_ICONS = { image: "📷", video: "🎬", sticker: "😃", face: "😃", emoji: "😃", audio: "🎵", file: "📎" };
+const KIND_LABELS = { image: "图片", video: "视频", sticker: "表情", face: "表情", emoji: "表情", audio: "语音", file: "文件" };
 
 const settings = {
   theme: localStorage.getItem("cc-theme") ?? "light",
@@ -232,19 +236,27 @@ const RANGE_PRESETS = [
 ];
 
 // "自上次记录": start where store coverage for the target groups ends (10 min overlap for dedup).
+// coverageEnds comes straight from scan_ranges, so groups whose messages were
+// pruned by retention still contribute; groups never scanned produce a warning.
 const resolveSinceStoreRange = async (request) => {
   const overview = await api("/api/store-overview");
-  const targetIds = request.mode === "groups"
-    ? new Set(request.groupIds)
-    : new Set((app.state?.watchlist ?? []).map((entry) => entry.groupId));
-  const ends = (overview.groups ?? [])
-    .filter((group) => targetIds.size === 0 || targetIds.has(group.groupId))
-    .map((group) => group.coverageEnd)
-    .filter((value) => Number.isFinite(value) && value > 0);
-  if (ends.length === 0) {
+  const targets = request.mode === "groups"
+    ? [...new Set(request.groupIds)]
+    : (app.state?.watchlist ?? []).map((entry) => entry.groupId);
+  const coverageEnds = overview.coverageEnds
+    ?? Object.fromEntries((overview.groups ?? []).map((group) => [group.groupId, group.coverageEnd]));
+  const covered = targets.filter((groupId) => Number.isFinite(coverageEnds[groupId]) && coverageEnds[groupId] > 0);
+  if (covered.length === 0) {
     throw new Error("这些群还没有任何记录，请先用固定时间范围跑一次。");
   }
-  return { type: "custom", start: unixToHkt(Math.min(...ends) - 600), end: "" };
+  const start = Math.min(...covered.map((groupId) => coverageEnds[groupId])) - 600;
+  const uncovered = targets.filter((groupId) => !covered.includes(groupId));
+  return {
+    range: { type: "custom", start: unixToHkt(start), end: "" },
+    warning: uncovered.length > 0
+      ? `提示：群 ${uncovered.join("、")} 还没有本地记录，本次只会从 ${unixToHkt(start).slice(0, 16)} 开始扫描；需要更早历史请用固定范围再跑一次。`
+      : null,
+  };
 };
 
 const rangeMatchesPreset = (preset) =>
@@ -287,7 +299,8 @@ const renderRunView = () => {
     ? el("div", { class: "row", style: "margin-bottom:14px" },
         el("input", { type: "text", id: "start-input", placeholder: "开始 2026-07-05 08:00:00", style: "width:230px", value: app.range.start ?? "" }),
         el("span", { style: "color:var(--muted)" }, "至"),
-        el("input", { type: "text", id: "end-input", placeholder: "结束（留空 = 现在）", style: "width:230px", value: app.range.end ?? "" }))
+        el("input", { type: "text", id: "end-input", placeholder: "结束（留空 = 现在）", style: "width:230px", value: app.range.end ?? "" }),
+        el("span", { class: "card-sub", style: "margin:0;flex-basis:100%" }, "时间按北京时间（UTC+8）解析，与界面显示一致。"))
     : null;
 
   const runCard = el("div", { class: "card" },
@@ -332,7 +345,11 @@ const startRun = async () => {
   try {
     const request = collectRunRequest();
     if (request.range.type === "sinceStore") {
-      request.range = await resolveSinceStoreRange(request);
+      const resolved = await resolveSinceStoreRange(request);
+      request.range = resolved.range;
+      if (resolved.warning !== null) {
+        $("#run-error").textContent = resolved.warning;
+      }
     }
     await api("/api/run", { method: "POST", body: JSON.stringify(request) });
     app.logCursor = 0;
@@ -444,6 +461,11 @@ const pollJobOnce = async () => {
   app.logCursor = snapshot.cursor;
 
   if (wasRunning && snapshot.job.status !== "running") {
+    // A finished run may have produced new media; drop the cached join map so
+    // the chat inlines them without a page reload.
+    app.msg.mediaMap = null;
+    app.msg.mediaRowMap = null;
+    app.msg.mediaMapAt = 0;
     await loadState();
     renderCurrentView();
   }

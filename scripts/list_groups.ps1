@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
     [string]$ConfigPath,
@@ -35,7 +35,7 @@ try {
     try {
         npm run prepare-clean-dbs -- -NtDbDir ([string]$config.ntDbDir) -RunDir $runDir
         if ($LASTEXITCODE -ne 0) {
-            throw "prepare-clean-dbs failed. ExitCode=$LASTEXITCODE"
+            throw "数据库副本准备失败（ExitCode=$LASTEXITCODE）。"
         }
     } finally {
         Pop-Location
@@ -43,7 +43,7 @@ try {
 
     node (Join-Path $toolRoot 'src\list_groups.js') (Join-Path $runDir 'clean-db\group_info.clean.db') $actualOutputPath
     if ($LASTEXITCODE -ne 0) {
-        throw "list_groups.js failed. ExitCode=$LASTEXITCODE"
+        throw "读取群列表失败（ExitCode=$LASTEXITCODE）。"
     }
     Write-Output ""
     Write-Output "runDir=$runDir"

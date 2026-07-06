@@ -8,10 +8,10 @@
     "useLlm": true,
     "exportMedia": true,
     "openReport": true,
-    "mediaFormats": "jpg,jpeg,png,gif,webp,mp4,mov,avi,mkv"
+    "mediaFormats": "jpg,jpeg,png,gif,webp,bmp,jfif,heic,mp4,mov,avi,mkv,webm,amr,silk,m4a,wav,mp3"
   },
   "store": {
-    "retentionDays": 3
+    "retentionDays": 30
   },
   "defaultDays": 7,
   "defaultScanLimit": 1000000,

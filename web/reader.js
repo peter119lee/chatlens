@@ -103,7 +103,11 @@ const groupSectionNode = (group, media) => {
 
   return el("div", { class: "card group-section", id: `reader-group-${group.groupId}` },
     el("h2", {}, group.name,
-      el("small", {}, `${group.groupId} · 文本 ${group.textMessages} · 媒体 ${group.mediaMessages} · ${group.llmSummary !== null ? "LLM 主题" : "本地分组"}`)),
+      el("small", {}, `${group.groupId} · 文本 ${group.textMessages} · 媒体 ${group.mediaMessages} · ${group.llmSummary !== null ? "LLM 主题" : "本地分组"}${
+        Number.isFinite(group.llmSummary?.provider?.messageLines) && group.llmSummary.provider.messageLines < group.textMessages
+          ? ` · AI 摘要基于最近 ${group.llmSummary.provider.messageLines} 条`
+          : ""
+      }`)),
     group.llmSummary?.summary ? el("p", { class: "card-sub" }, group.llmSummary.summary) : null,
     timelineNodes(group),
     topicNodes(group),

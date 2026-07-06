@@ -4,6 +4,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const state = require("./toolkit_state");
 const { quotePs } = require("./run_jobs");
+const packageInfo = require("../../package.json");
 
 const SECRET_DIR = path.join(process.env.APPDATA ?? "", "QQSummaryTools");
 const SECRET_FILES = {
@@ -48,16 +49,31 @@ const runPowershell = (commandText, stdinText) =>
 
 const getSettingsStatus = () => {
   const config = state.loadConfig();
+  const retentionDays = Number(config.store?.retentionDays);
   return {
+    version: packageInfo.version,
     ntqqKeySaved: fs.existsSync(path.join(SECRET_DIR, SECRET_FILES.ntqqKey)),
     llmKeySaved: fs.existsSync(path.join(SECRET_DIR, SECRET_FILES.llmKey)),
     ntDbDir: config.ntDbDir ?? "",
     ntDataDir: config.ntDataDir ?? "",
+    store: {
+      retentionDays: Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : 30,
+    },
     llm: {
       baseUrl: config.llm?.baseUrl ?? "",
       model: config.llm?.model ?? "",
     },
   };
+};
+
+const saveStoreConfig = ({ retentionDays }) => {
+  const days = Number.parseInt(retentionDays, 10);
+  if (!Number.isInteger(days) || days < 1 || days > 365) {
+    throw new Error("保留天数应为 1-365 的整数。");
+  }
+  const config = state.loadRawConfig();
+  saveConfigPatch({ store: { ...(config.store ?? {}), retentionDays: days } });
+  return { retentionDays: days };
 };
 
 // The secret travels via stdin only — never on a command line, never in a log.
@@ -171,7 +187,13 @@ const saveQqPaths = ({ ntDbDir, ntDataDir }) => {
 // (each base plus its nested "Tencent Files\Tencent Files" layout).
 const detectQqPaths = () => {
   const candidates = [];
-  const bases = [path.join(os.homedir(), "Documents", "Tencent Files")];
+  const bases = [
+    path.join(os.homedir(), "Documents", "Tencent Files"),
+    // OneDrive-redirected Documents (common on consumer Windows installs)
+    // lives outside os.homedir()/Documents and used to defeat auto-detection.
+    ...(process.env.OneDrive ? [path.join(process.env.OneDrive, "Documents", "Tencent Files")] : []),
+    path.join(os.homedir(), "OneDrive", "Documents", "Tencent Files"),
+  ];
   for (let code = 67; code <= 90; code += 1) {
     bases.push(`${String.fromCharCode(code)}:\\Tencent Files`);
   }
@@ -194,7 +216,7 @@ const detectQqPaths = () => {
         continue;
       }
       const ntDbDir = path.join(root, entry.name, "nt_qq", "nt_db");
-      if (fs.existsSync(ntDbDir)) {
+      if (fs.existsSync(ntDbDir) && !candidates.some((candidate) => candidate.ntDbDir === ntDbDir)) {
         candidates.push({
           qq: entry.name,
           ntDbDir,
@@ -208,6 +230,7 @@ const detectQqPaths = () => {
 
 module.exports = {
   getSettingsStatus,
+  saveStoreConfig,
   saveSecret,
   fetchLlmModels,
   saveLlmConfig,

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
     [string]$ConfigPath,
@@ -24,23 +24,23 @@ $actualConfigPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 
 $config = Read-ToolkitConfig -Path $actualConfigPath
 $actualCandidatePath = if ([string]::IsNullOrWhiteSpace($CandidatePath)) {
-    throw 'Pass -CandidatePath <memory-candidates.txt> (a key-candidate dump from a memory scan). If you already know the key, use save_key.ps1 option 2 or the web console settings page instead.'
+    throw '请传 -CandidatePath <memory-candidates.txt>（内存扫描导出的密钥候选文件）。若已知道密钥，请改用 save_key.ps1 选项 2 或网页控制台的设置页。'
 } else {
     $CandidatePath
 }
 
 if (-not (Test-Path -LiteralPath $actualCandidatePath)) {
-    throw "Candidate file does not exist: $actualCandidatePath"
+    throw "候选文件不存在: $actualCandidatePath"
 }
 
 $actualDatabasePath = if ([string]::IsNullOrWhiteSpace($DatabasePath)) {
-    throw 'Pass -DatabasePath <nt_msg.clean.db> (create one with prepare_clean_dbs.ps1 first).'
+    throw '请传 -DatabasePath <nt_msg.clean.db>（可先用 prepare_clean_dbs.ps1 生成）。'
 } else {
     $DatabasePath
 }
 
 if (-not (Test-Path -LiteralPath $actualDatabasePath)) {
-    throw "Clean QQNT database does not exist: $actualDatabasePath. Run prepare_clean_dbs.ps1 first, then pass -DatabasePath to the generated nt_msg.clean.db."
+    throw "QQNT 数据库副本不存在: $actualDatabasePath。请先运行 prepare_clean_dbs.ps1，再把生成的 nt_msg.clean.db 传给 -DatabasePath。"
 }
 
 $secretDir = Join-Path $env:APPDATA 'QQSummaryTools'
@@ -48,5 +48,5 @@ $secretPath = Join-Path $secretDir 'ntqq-db-key.dpapi'
 
 node (Join-Path $toolRoot 'src\save_key_from_candidates.js') $actualDatabasePath $actualCandidatePath $secretPath
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to find and save a usable NTQQ DB key from candidates. CandidatePath=$actualCandidatePath DatabasePath=$actualDatabasePath ExitCode=$LASTEXITCODE"
+    throw "没能从候选中找到可用的 NTQQ 数据库密钥。CandidatePath=$actualCandidatePath DatabasePath=$actualDatabasePath ExitCode=$LASTEXITCODE"
 }

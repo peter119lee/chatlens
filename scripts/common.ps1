@@ -9,7 +9,7 @@
         if (Test-Path -LiteralPath $examplePath) {
             Copy-Item -LiteralPath $examplePath -Destination $Path
         } else {
-            throw "Config file does not exist: $Path"
+            throw "配置文件不存在: $Path"
         }
     }
 
@@ -116,7 +116,7 @@ function Read-SavedNtqqKey {
 
     $secretPath = Join-Path (Join-Path $env:APPDATA 'QQSummaryTools') 'ntqq-db-key.dpapi'
     if (-not (Test-Path -LiteralPath $secretPath)) {
-        throw "Saved NTQQ DB key not found. Run scripts\save_key.ps1 first: $secretPath"
+        throw "没有找到已保存的 NTQQ 数据库密钥。请先在控制台设置页保存，或运行 scripts\save_key.ps1: $secretPath"
     }
 
     $encrypted = (Get-Content -LiteralPath $secretPath -Raw).Trim()
@@ -136,7 +136,7 @@ function Read-SavedSecret {
 
     $secretPath = Join-Path (Join-Path $env:APPDATA 'QQSummaryTools') $FileName
     if (-not (Test-Path -LiteralPath $secretPath)) {
-        throw "$SecretName not found. Save it first: $secretPath"
+        throw "没有找到 $SecretName。请先保存: $secretPath"
     }
 
     $encrypted = (Get-Content -LiteralPath $secretPath -Raw).Trim()
@@ -190,7 +190,7 @@ function ConvertTo-GroupIdList {
             }
 
             if ($groupId -notmatch '^\d+$') {
-                throw "Invalid QQ group id '$groupId'. Group ids must contain digits only."
+                throw "无效的 QQ 群号 '$groupId'：群号只能是数字。"
             }
 
             if ($seen.Add($groupId)) {
@@ -209,7 +209,7 @@ function Read-GroupIdListFile {
     )
 
     if (-not (Test-Path -LiteralPath $Path)) {
-        throw "Group list file does not exist: $Path"
+        throw "群号列表文件不存在: $Path"
     }
 
     $values = @()
@@ -242,12 +242,21 @@ function ConvertTo-UnixTimeFromLocalText {
         [string]$Text
     )
 
+    # 界面与报告展示的时间一律是北京时间 (UTC+8)：不带时区的输入也按北京时间解析，
+    # 显式带偏移（+08:00 / Z）时按其解析。以前的 AssumeLocal 在非东八区机器上会把
+    # 扫描窗口整体平移数小时，导致消息缺失甚至范围无效。
     try {
-        $styles = [System.Globalization.DateTimeStyles]::AssumeLocal
-        $parsed = [DateTimeOffset]::Parse($Text, [System.Globalization.CultureInfo]::InvariantCulture, $styles)
+        $trimmed = $Text.Trim()
+        if ($trimmed -match '(?:Z|[+-]\d{2}:?\d{2})\s*$') {
+            $parsed = [DateTimeOffset]::Parse($trimmed, [System.Globalization.CultureInfo]::InvariantCulture)
+        } else {
+            $naive = [datetime]::Parse($trimmed, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None)
+            $naive = [datetime]::SpecifyKind($naive, [System.DateTimeKind]::Unspecified)
+            $parsed = New-Object System.DateTimeOffset($naive, [TimeSpan]::FromHours(8))
+        }
         $parsed.ToUnixTimeSeconds()
     } catch {
-        throw "Invalid time '$Text'. Use a concrete time such as 2026-07-02 18:30:00 or include an offset like 2026-07-02T18:30:00+08:00."
+        throw "无法解析时间 '$Text'。请使用北京时间，例如 2026-07-02 18:30，或带时区写法 2026-07-02T18:30:00+08:00。"
     }
 }
 

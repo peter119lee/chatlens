@@ -71,7 +71,7 @@ function Show-Watchlist {
 
     Write-Output ''
     if (@($Entries).Length -eq 0) {
-        Write-Output 'Watchlist is empty. 当前没有关注的群。'
+        Write-Output '当前没有关注的群。'
         return
     }
 

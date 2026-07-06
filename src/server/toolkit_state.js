@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJson } = require("../report_utils");
-const { collectRuns, pathExists, dirSize } = require("../run_index");
+const { collectRuns, pathExists, dirSize, parseRunTimestamp } = require("../run_index");
 const messageStore = require("../message_store");
 
 const toolRoot = path.resolve(__dirname, "..", "..");
@@ -231,6 +231,8 @@ const getStoreMessages = (query) => {
     toUnix: parseUnixParam(query.to),
     afterSentAt: parseUnixParam(query.afterSentAt),
     afterRowId: typeof query.afterRowId === "string" && query.afterRowId.length > 0 ? query.afterRowId : undefined,
+    beforeSentAt: parseUnixParam(query.beforeSentAt),
+    beforeRowId: typeof query.beforeRowId === "string" && query.beforeRowId.length > 0 ? query.beforeRowId : undefined,
     limit: Number.parseInt(query.limit ?? "300", 10),
     search: typeof query.q === "string" ? query.q : undefined,
   });
@@ -249,6 +251,9 @@ const getStoreOverview = () => {
       ...group,
       readMark: messageStore.getReadMark(db, group.groupId),
     })),
+    // Straight from scan_ranges: also covers groups whose stored messages
+    // were fully pruned, so "自上次记录" never skips their gap silently.
+    coverageEnds: messageStore.getCoverageEnds(db),
     retentionDays: (() => {
       const config = loadConfig();
       const days = Number(config.store?.retentionDays);
@@ -260,10 +265,13 @@ const getStoreOverview = () => {
 // Matches the queryMessages server-side clamp; larger selections keep the oldest 500.
 const QUICK_SUMMARY_MAX_MESSAGES = 500;
 
+// Beijing time (UTC+8), matching every other timestamp the pipeline and UI
+// show; machine-local time here made quick-summary citations look shifted on
+// non-UTC+8 machines.
 const toLocalStamp = (unix) => {
-  const date = new Date(unix * 1000);
+  const date = new Date((unix + 8 * 3600) * 1000);
   const pad = (value) => String(value).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
 };
 
 const prepareQuickSummary = ({ groupId, fromUnix, toUnix }) => {
@@ -407,7 +415,11 @@ const saveReadMark = ({ groupId, sentAt, rowId, toLatest }) => {
 };
 
 const MEDIA_INDEX_TTL_MS = 30 * 1000;
+// MAX_ITEMS counts unique files (primaries); duplicate occurrences ride along
+// up to the total cap so the chat join still sees every occurrence without
+// dups evicting older unique media from the budget.
 const MEDIA_INDEX_MAX_ITEMS = 4000;
+const MEDIA_INDEX_TOTAL_CAP = 12000;
 let mediaIndexCache = null;
 
 const buildMediaIndex = (forceRefresh) => {
@@ -432,8 +444,9 @@ const buildMediaIndex = (forceRefresh) => {
       let manifest;
       try {
         manifest = readJson(manifestPath);
-      } catch {
+      } catch (error) {
         // A truncated manifest from a killed run must not break the whole index.
+        console.error(`media-index: 跳过无法解析的 manifest（${entry.name}）: ${error.message}`);
         continue;
       }
 
@@ -458,12 +471,15 @@ const buildMediaIndex = (forceRefresh) => {
           runId: entry.name,
           groupId: String(item.groupId ?? ""),
           groupName: item.groupName ?? "",
+          rowId: String(item.rowId ?? ""),
           hkt: item.hkt ?? "",
           speaker: item.speaker ?? "",
           kind: item.kind ?? "file",
           bytes,
           webPath,
-          dedupKey: item.hash ?? path.basename(item.copiedPath).toLowerCase(),
+          // Group-scoped key: the same file posted in two groups must stay
+          // visible under BOTH groups' filters in the media tab.
+          dedupKey: `${String(item.groupId ?? "")}|${item.hash ?? path.basename(item.copiedPath).toLowerCase()}`,
         });
       }
     }
@@ -482,13 +498,26 @@ const buildMediaIndex = (forceRefresh) => {
     item.dup = primaryByKey.get(item.dedupKey) !== item;
   }
 
-  const items = allItems.sort((left, right) => right.hkt.localeCompare(left.hkt));
-  const uniqueCount = primaryByKey.size;
+  const sorted = allItems.sort((left, right) => right.hkt.localeCompare(left.hkt));
+  const items = [];
+  let primaries = 0;
+  for (const item of sorted) {
+    if (items.length >= MEDIA_INDEX_TOTAL_CAP) {
+      break;
+    }
+    if (!item.dup) {
+      if (primaries >= MEDIA_INDEX_MAX_ITEMS) {
+        break;
+      }
+      primaries += 1;
+    }
+    items.push(item);
+  }
   const payload = {
-    totalItems: uniqueCount,
-    truncated: items.length > MEDIA_INDEX_MAX_ITEMS,
+    totalItems: primaryByKey.size,
+    truncated: items.length < sorted.length,
     scannedRefs,
-    items: items.slice(0, MEDIA_INDEX_MAX_ITEMS),
+    items,
   };
   mediaIndexCache = { builtAt: Date.now(), payload };
   return payload;
@@ -522,25 +551,29 @@ const cleanupGeneratedData = ({ olderThanDays = 0 } = {}) => {
       continue;
     }
 
+    // Age from the run-id timestamp: directory mtime is unreliable here —
+    // deleting clean-db below bumps it and would make every such run look
+    // fresh, turning "删除 N 天前的旧运行" into a silent no-op.
+    let referenceMs = parseRunTimestamp(entry.name);
+    if (referenceMs === null) {
+      try {
+        referenceMs = fs.statSync(runDir).mtimeMs;
+      } catch {
+        referenceMs = null;
+      }
+    }
+    if (cutoffMs !== null && referenceMs !== null && referenceMs < cutoffMs) {
+      result.freedBytes += dirSize(runDir);
+      fs.rmSync(runDir, { recursive: true, force: true });
+      result.removedRunCount += 1;
+      continue;
+    }
+
     const cleanDbDir = path.join(runDir, "clean-db");
     if (pathExists(cleanDbDir)) {
       result.freedBytes += dirSize(cleanDbDir);
       fs.rmSync(cleanDbDir, { recursive: true, force: true });
       result.removedCleanDbCount += 1;
-    }
-
-    if (cutoffMs !== null) {
-      let stat;
-      try {
-        stat = fs.statSync(runDir);
-      } catch {
-        continue;
-      }
-      if (stat.mtimeMs < cutoffMs) {
-        result.freedBytes += dirSize(runDir);
-        fs.rmSync(runDir, { recursive: true, force: true });
-        result.removedRunCount += 1;
-      }
     }
   }
   return result;

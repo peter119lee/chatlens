@@ -225,6 +225,9 @@ const renderSettingsView = () => {
   /* --- disk cleanup --- */
   const cleanupCard = renderCleanupCard();
 
+  /* --- check & update --- */
+  const updateCard = renderUpdateCard();
+
   const aboutCard = el("div", { class: "card" },
     el("h2", {}, "安全说明"),
     el("ul", { style: "margin:0;padding-left:18px;font-size:13px;color:var(--muted);line-height:1.9" },
@@ -232,7 +235,83 @@ const renderSettingsView = () => {
       el("li", {}, "本地：控制台只监听 127.0.0.1，带每次启动随机生成的访问令牌。"),
       el("li", {}, "外部流量仅两处：头像走 QQ 公开 CDN；开启 AI 总结时消息文本会发送到你配置的 LLM 服务。")));
 
-  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, scheduleCard, cleanupCard, aboutCard);
+  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, scheduleCard, cleanupCard, updateCard, aboutCard);
+};
+
+/* --- check & update card --- */
+
+const updateState = { info: null, busy: false, notice: null };
+
+const renderUpdateCard = () => {
+  const msg = el("span", { style: "font-size:13px" });
+  if (updateState.notice !== null) {
+    settingsFeedback(msg, updateState.notice.text, updateState.notice.isError);
+  }
+  const info = updateState.info;
+  const currentVersion = settingsState.status?.version ?? "?";
+
+  const checkButton = el("button", {
+    class: "btn small",
+    disabled: updateState.busy,
+    onclick: async () => {
+      updateState.busy = true;
+      updateState.notice = { text: "正在检查更新…", isError: false };
+      renderSettingsView();
+      try {
+        updateState.info = await api("/api/update/check");
+        updateState.notice = updateState.info.hasUpdate
+          ? { text: `发现新版本 v${updateState.info.latestVersion}（当前 v${updateState.info.currentVersion}）。`, isError: false }
+          : { text: `已是最新版本（v${updateState.info.currentVersion}）。`, isError: false };
+      } catch (error) {
+        updateState.notice = { text: `检查失败：${error.message}`, isError: true };
+      }
+      updateState.busy = false;
+      renderSettingsView();
+    },
+  }, "🔎 检查更新");
+
+  const applyButton = info?.hasUpdate === true
+    ? el("button", {
+        class: "btn small primary",
+        disabled: updateState.busy,
+        onclick: async () => {
+          if (!window.confirm(`更新到 v${info.latestVersion}？\n控制台会自动退出并重启（约 10-30 秒）。配置、密钥和已生成的数据都会保留。`)) {
+            return;
+          }
+          updateState.busy = true;
+          updateState.notice = { text: "正在下载并安装更新…", isError: false };
+          renderSettingsView();
+          try {
+            await api("/api/update/apply", { method: "POST", body: "{}" });
+            setChildren($("#view-settings"),
+              el("div", { class: "card" },
+                el("h2", {}, "正在更新"),
+                el("p", { class: "card-sub" },
+                  "控制台正在退出并替换程序文件，完成后会自动重新启动并打开新页面。",
+                  el("br"),
+                  "如果 30 秒后没有自动打开，请手动双击 Start-QQ-Console.cmd。")));
+            return;
+          } catch (error) {
+            updateState.notice = { text: `更新失败：${error.message}`, isError: true };
+          }
+          updateState.busy = false;
+          renderSettingsView();
+        },
+      }, `⬆️ 一键更新到 v${info.latestVersion}`)
+    : null;
+
+  const notesBlock = info?.hasUpdate === true && info.notes
+    ? el("pre", { style: "margin:10px 0 0;padding:10px;border:1px solid var(--line);border-radius:8px;font-size:12px;white-space:pre-wrap;max-height:180px;overflow:auto;color:var(--muted)" }, info.notes)
+    : null;
+
+  return el("div", { class: "card" },
+    el("h2", {}, "关于与更新"),
+    el("p", { class: "card-sub" },
+      `当前版本 v${currentVersion} · 项目主页 `,
+      el("a", { href: "https://github.com/peter119lee/chatlens", target: "_blank", rel: "noopener" }, "GitHub"),
+      "。检查更新会访问 GitHub 获取最新发布版本；一键更新会下载对应安装包并自动重启控制台，你的配置、密钥和数据不受影响。"),
+    el("div", { class: "row" }, checkButton, applyButton, msg),
+    notesBlock);
 };
 
 // Move the old 清理生成数据.cmd here so freeing disk space stays a one-click
@@ -240,6 +319,14 @@ const renderSettingsView = () => {
 const renderCleanupCard = () => {
   const msg = el("span", { style: "font-size:13px" });
   const daysInput = el("input", { type: "number", value: "7", min: "1", max: "365", style: "width:70px" });
+  const retentionMsg = el("span", { style: "font-size:13px" });
+  const retentionInput = el("input", {
+    type: "number",
+    value: String(settingsState.status?.store?.retentionDays ?? 30),
+    min: "1",
+    max: "365",
+    style: "width:70px",
+  });
 
   const runCleanup = async (button, payload, describe) => {
     button.disabled = true;
@@ -254,10 +341,10 @@ const renderCleanupCard = () => {
   };
 
   return el("div", { class: "card" },
-    el("h2", {}, "磁盘清理"),
+    el("h2", {}, "磁盘清理与消息保留"),
     el("p", { class: "card-sub" },
       "生成的扫描数据都在本机 runs\\ 目录。「临时数据库副本」是每次扫描解密出的 clean-db，删掉不影响报告；" +
-      "「旧运行」会连同该次的媒体副本一起删除（历史报告里的图片预览也会随之消失）。"),
+      "「旧运行」会连同该次的媒体副本一起删除 —— 历史报告的图片预览、聊天里的内嵌图片和媒体页都将无法再显示这些文件。"),
     el("div", { class: "row" },
       el("button", {
         class: "btn small primary",
@@ -275,10 +362,36 @@ const renderCleanupCard = () => {
             settingsFeedback(msg, "请输入有效的天数。", true);
             return;
           }
+          if (!window.confirm(`确定删除 ${days} 天前的旧运行？\n历史报告预览、聊天内嵌图片和媒体页将无法再显示这些文件。`)) {
+            return;
+          }
           runCleanup(event.target, { olderThanDays: days }, `已删除 ${days} 天前的旧运行`);
         },
       }, "执行"),
-      msg));
+      msg),
+    el("div", { class: "row", style: "margin-top:10px" },
+      el("span", { style: "font-size:13px" }, "「消息」页保留最近"),
+      retentionInput,
+      el("span", { style: "font-size:13px" }, "天的本地消息"),
+      el("button", {
+        class: "btn small",
+        onclick: async (event) => {
+          const button = event.target;
+          button.disabled = true;
+          try {
+            const result = await api("/api/settings/store", {
+              method: "POST",
+              body: JSON.stringify({ retentionDays: retentionInput.value }),
+            });
+            settingsFeedback(retentionMsg, `已保存：保留 ${result.retentionDays} 天（下次扫描后生效）。`, false);
+            settingsState.status = await api("/api/settings");
+          } catch (error) {
+            settingsFeedback(retentionMsg, error.message, true);
+          }
+          button.disabled = false;
+        },
+      }, "保存"),
+      retentionMsg));
 };
 
 const renderScheduleCard = () => {
@@ -306,7 +419,8 @@ const renderScheduleCard = () => {
     el("h2", {}, "定时总结"),
     el("p", { class: "card-sub" },
       "用 Windows 计划任务每天定点自动总结「关注群」。它独立运行，不需要控制台开着；" +
-      "如果到点时电脑关机或睡眠，开机后会自动补跑这次（不会静默跳过）。"),
+      "如果到点时电脑关机或睡眠，开机后会自动补跑这次（不会静默跳过）。" +
+      "每次都从上次记录点继续扫描，停机多久都不会漏消息。"),
     el("div", { class: "row", style: "margin-bottom:10px" }, statusLine),
     el("div", { class: "row" },
       el("span", { style: "font-size:13px" }, "每天"),

@@ -8,7 +8,7 @@ const MSG_PAGE_SIZE = 300;
 const BUBBLE_GROUP_GAP_SECONDS = 300;
 const AUTO_READ_DEBOUNCE_MS = 1500;
 
-const msgObservers = { scroll: null, read: null, readTimer: null, maxSeen: null };
+const msgObservers = { scroll: null, scrollUp: null, read: null, readTimer: null, maxSeen: null };
 
 const shortTime = (unix) => {
   if (!Number.isFinite(unix)) {
@@ -83,24 +83,41 @@ const buildMessagesQuery = (reset) => {
   return params;
 };
 
-// Media messages carry no file path; join against the media index by group + timestamp.
+// Media messages carry no file path; join against the media index. Preferred
+// key is the exact message row id (handles multi-image messages); the
+// second-precision timestamp join remains as fallback for old manifests.
+const MEDIA_MAP_TTL_MS = 60 * 1000;
+
 const ensureMediaMap = async () => {
-  if (app.msg.mediaMap instanceof Map) {
+  const msg = app.msg;
+  if (msg.mediaMap instanceof Map && Date.now() - (msg.mediaMapAt ?? 0) < MEDIA_MAP_TTL_MS) {
     return;
   }
   try {
     const data = await api("/api/media-index");
-    const map = new Map();
+    const byTime = new Map();
+    const byRow = new Map();
     for (const item of data.items ?? []) {
-      const key = `${item.groupId}|${item.hkt}`;
-      if (!map.has(key)) {
-        map.set(key, []);
+      const timeKey = `${item.groupId}|${item.hkt}`;
+      if (!byTime.has(timeKey)) {
+        byTime.set(timeKey, []);
       }
-      map.get(key).push(item);
+      byTime.get(timeKey).push(item);
+      if (typeof item.rowId === "string" && item.rowId.length > 0) {
+        const rowKey = `${item.groupId}|${item.rowId}`;
+        if (!byRow.has(rowKey)) {
+          byRow.set(rowKey, []);
+        }
+        byRow.get(rowKey).push(item);
+      }
     }
-    app.msg.mediaMap = map;
+    msg.mediaMap = byTime;
+    msg.mediaRowMap = byRow;
+    msg.mediaMapAt = Date.now();
   } catch {
-    app.msg.mediaMap = new Map();
+    msg.mediaMap = msg.mediaMap instanceof Map ? msg.mediaMap : new Map();
+    msg.mediaRowMap = msg.mediaRowMap instanceof Map ? msg.mediaRowMap : new Map();
+    msg.mediaMapAt = Date.now();
   }
 };
 
@@ -122,6 +139,30 @@ const loadMessages = async (reset) => {
     if (reset && msg.dividerAt === null && msg.readMark !== null) {
       msg.dividerAt = msg.readMark.sentAt;
     }
+  } finally {
+    msg.loading = false;
+  }
+};
+
+// Backward (older) page loader for the top sentinel; prepends and keeps the
+// forward cursor untouched.
+const loadOlderMessages = async () => {
+  const msg = app.msg;
+  if (msg.loading || msg.items.length === 0) {
+    return;
+  }
+  msg.loading = true;
+  try {
+    const first = msg.items[0];
+    const params = new URLSearchParams({ groupId: msg.groupId, limit: String(MSG_PAGE_SIZE) });
+    params.set("beforeSentAt", String(first.sentAt));
+    params.set("beforeRowId", first.rowId);
+    if (msg.q.trim().length > 0) {
+      params.set("q", msg.q.trim());
+    }
+    const result = await api(`/api/messages?${params}`);
+    msg.items = [...result.messages, ...msg.items];
+    msg.hasOlder = result.hasMore && result.messages.length > 0;
   } finally {
     msg.loading = false;
   }
@@ -155,6 +196,7 @@ const openChat = async ({ groupId, groupName, fromUnix, toUnix, fromLastRead }) 
     msg.to = toUnix ?? null;
     msg.rangeKey = "custom";
   }
+  msg.hasOlder = Number.isFinite(msg.from);
 
   renderMessagesView();
   try {
@@ -215,6 +257,12 @@ const markReadToLatest = async () => {
 
 // Advance the read mark as messages actually scroll into view (advance-only on the server).
 const scheduleAutoRead = (sentAt, rowId) => {
+  // Never advance the read mark while the window/tab is not actually visible:
+  // an open-but-backgrounded chat used to mark messages read that the user
+  // never saw, making "从上次已读" skip past them.
+  if (document.hidden) {
+    return;
+  }
   const seen = msgObservers.maxSeen;
   if (seen === null || seen.groupId !== app.msg.groupId || sentAt > seen.sentAt) {
     msgObservers.maxSeen = { groupId: app.msg.groupId, sentAt, rowId };
@@ -224,6 +272,9 @@ const scheduleAutoRead = (sentAt, rowId) => {
   }
   msgObservers.readTimer = setTimeout(async () => {
     msgObservers.readTimer = null;
+    if (document.hidden) {
+      return;
+    }
     const target = msgObservers.maxSeen;
     if (target === null
       || target.groupId !== app.msg.groupId
@@ -346,25 +397,38 @@ const summarizeSelection = async () => {
 const coverageGapBetween = (prevUnix, nextUnix) =>
   app.msg.coverage.some((range) => range.endUnix > prevUnix && range.endUnix < nextUnix);
 
-const isImageFile = (kind) => kind === "image" || kind === "sticker" || kind === "face";
+const isImageFile = (kind) => kind === "image" || kind === "sticker" || kind === "face" || kind === "emoji";
 
-const mediaFileFor = (item, counters) => {
+const mediaFilesFor = (item, counters) => {
   if (item.isMedia !== 1 || !(app.msg.mediaMap instanceof Map)) {
-    return null;
+    return [];
+  }
+  // Exact join by message row id first: store media rows are m<rowId>, the
+  // manifest carries the same rowId once per file, so albums return ALL files.
+  const rawRowId = String(item.rowId ?? "");
+  const messageRowId = rawRowId.startsWith("m") ? rawRowId.slice(1) : rawRowId;
+  if (app.msg.mediaRowMap instanceof Map && messageRowId.length > 0) {
+    const byRow = app.msg.mediaRowMap.get(`${item.groupId}|${messageRowId}`);
+    if (byRow !== undefined && byRow.length > 0) {
+      return byRow;
+    }
   }
   const key = `${item.groupId}|${unixToHkt(item.sentAt)}`;
   const list = app.msg.mediaMap.get(key);
   if (list === undefined) {
-    return null;
+    return [];
   }
   const used = counters.get(key) ?? 0;
   counters.set(key, used + 1);
-  return list[used] ?? list[0];
+  const picked = list[used] ?? list[0];
+  return picked === undefined ? [] : [picked];
 };
 
-const chatMessageNode = (item, index, inSelection, mediaFile) => {
+const chatMessageNode = (item, index, inSelection, mediaFiles) => {
   const isUnread = app.msg.dividerAt !== null && item.sentAt > app.msg.dividerAt;
-  const showImage = mediaFile != null && isImageFile(mediaFile.kind);
+  const imageFiles = mediaFiles.filter((file) => isImageFile(file.kind));
+  const showImage = imageFiles.length > 0;
+  const firstFile = mediaFiles[0];
   const classes = ["bubble"];
   if (item.isMedia === 1) {
     classes.push("media");
@@ -381,14 +445,24 @@ const chatMessageNode = (item, index, inSelection, mediaFile) => {
   return el("div", {
     class: classes.join(" "),
     dataset: { idx: String(index), sentat: String(item.sentAt), rowid: item.rowId },
-    onclick: mediaFile != null ? () => window.open(mediaFile.webPath, "_blank", "noopener") : undefined,
+    onclick: !showImage && firstFile !== undefined ? () => window.open(firstFile.webPath, "_blank", "noopener") : undefined,
     oncontextmenu: (event) => {
       event.preventDefault();
       onSelectMessage(index);
     },
   },
     showImage
-      ? el("img", { class: "bubble-img", src: mediaFile.webPath, loading: "lazy", alt: "图片" })
+      ? imageFiles.slice(0, 9).map((file) =>
+          el("img", {
+            class: "bubble-img",
+            src: file.webPath,
+            loading: "lazy",
+            alt: "图片",
+            onclick: (event) => {
+              event.stopPropagation();
+              window.open(file.webPath, "_blank", "noopener");
+            },
+          }))
       : displayText(item),
     el("time", {}, unixToHkt(item.sentAt).slice(11, 16)));
 };
@@ -461,7 +535,7 @@ const buildChatNodes = () => {
         nodes.push(el("div", { class: "bubble-group" },
           avatarEl(item.speaker, item.speaker, "sm", userAvatarUrl(item.speakerUin)), bubbleBody));
       }
-      bubbleBody.append(chatMessageNode(item, index, inSelection, mediaFileFor(item, mediaCounters)));
+      bubbleBody.append(chatMessageNode(item, index, inSelection, mediaFilesFor(item, mediaCounters)));
     }
     prevItem = item;
   });
@@ -471,7 +545,32 @@ const buildChatNodes = () => {
 
 const setupChatObservers = (listNode) => {
   msgObservers.scroll?.disconnect();
+  msgObservers.scrollUp?.disconnect();
   msgObservers.read?.disconnect();
+
+  // Scroll-up loader: chat paging used to be forward-only, so after a
+  // time-jump or "从上次已读" the messages older than the window start were
+  // unreachable even though the store had them.
+  const topSentinel = listNode.querySelector(".load-sentinel-top");
+  if (topSentinel !== null) {
+    msgObservers.scrollUp = new IntersectionObserver(async (entries) => {
+      if (entries.some((entry) => entry.isIntersecting) && app.msg.hasOlder && !app.msg.loading) {
+        const previousHeight = listNode.scrollHeight;
+        const previousTop = listNode.scrollTop;
+        try {
+          await loadOlderMessages();
+        } catch {
+          return;
+        }
+        renderMessagesView();
+        const nextList = document.querySelector(".chat-scroll");
+        if (nextList !== null) {
+          nextList.scrollTop = previousTop + (nextList.scrollHeight - previousHeight);
+        }
+      }
+    }, { root: listNode, rootMargin: "200px" });
+    msgObservers.scrollUp.observe(topSentinel);
+  }
 
   const sentinel = listNode.querySelector(".load-sentinel");
   if (sentinel !== null) {
@@ -517,6 +616,7 @@ const chatRangeChips = () => {
         msg.items = [];
         msg.selA = null;
         msg.selB = null;
+        msg.hasOlder = Number.isFinite(msg.from);
         msg.scrollToUnread = key === "lastread";
         renderMessagesView();
         try {
@@ -562,6 +662,7 @@ const jumpToTime = async (text) => {
   msg.items = [];
   msg.selA = null;
   msg.selB = null;
+  msg.hasOlder = true;
   msg.scrollToTime = target;
   renderMessagesView();
   try {
@@ -608,6 +709,7 @@ const renderChat = () => {
   const listNodes = buildChatNodes();
 
   const list = el("div", { class: `chat-scroll ${msg.style === "compact" ? "msg-list" : "chat-list"}` },
+    msg.hasOlder && msg.items.length > 0 ? el("div", { class: "load-sentinel-top empty" }, "上滑加载更早…") : null,
     msg.items.length === 0 && !msg.loading
       ? el("div", { class: "empty" }, "这个范围内没有本地记录。")
       : listNodes,
@@ -656,7 +758,9 @@ const renderChat = () => {
           renderMessagesView();
         },
       })),
-    el("p", { class: "card-sub", style: "margin:8px 0 0" }, "提示：右键点一条消息选起点，再右键另一条选终点，可对选中段落做 AI 总结。"));
+    el("p", { class: "card-sub", style: "margin:8px 0 0" },
+      "提示：右键点一条消息选起点，再右键另一条选终点，可对选中段落做 AI 总结。",
+      msg.q.trim().length > 0 ? " 搜索只匹配文本与发言人，媒体消息可能不出现在结果里。" : null));
 
   const range = selectionRange();
   const selectionBar = range === null ? null

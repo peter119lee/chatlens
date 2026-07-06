@@ -5,7 +5,7 @@
 const MEDIA_SHOWN_CAP = 400;
 const MEDIA_EXPORT_CAP = 200;
 
-const isImageKind = (kind) => kind === "image" || kind === "sticker" || kind === "face";
+const isImageKind = (kind) => kind === "image" || kind === "sticker" || kind === "face" || kind === "emoji";
 
 const openMediaView = async (forceRefresh) => {
   showView("media");
@@ -158,6 +158,9 @@ const renderMediaView = () => {
           ? el("button", { class: "btn small primary", disabled: tab.selected.size === 0, onclick: exportSelectedMedia },
               `📥 导出原图 (${tab.selected.size})`)
           : null)),
+    tab.data?.truncated
+      ? el("p", { class: "card-sub", style: "margin:0 0 8px" }, "媒体索引已达上限，更早的文件未列出（可在设置页清理旧运行，或用筛选缩小范围）。")
+      : null,
     el("div", { class: "chips", style: "margin-bottom:8px" },
       mediaChip(tab.group === "all", "全部群", () => setAndRender({ group: "all", person: "all", selected: new Set() })),
       groupEntries.map(([groupId, name]) =>

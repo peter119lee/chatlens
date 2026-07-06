@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
     [string]$ConfigPath
@@ -21,7 +21,7 @@ $outputHtml = Join-Path ([string]$config.reportsDir) 'index.html'
 
 node (Join-Path $toolRoot 'src\generate_report_center.js') $actualConfigPath $outputHtml
 if ($LASTEXITCODE -ne 0) {
-    throw "generate_report_center failed. ExitCode=$LASTEXITCODE OutputHtml=$outputHtml"
+    throw "生成报告中心失败（ExitCode=$LASTEXITCODE）。OutputHtml=$outputHtml"
 }
 
 Write-Output "reportCenter=$outputHtml"

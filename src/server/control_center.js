@@ -7,6 +7,7 @@ const state = require("./toolkit_state");
 const jobs = require("./run_jobs");
 const settings = require("./settings_ops");
 const scheduler = require("./scheduler_ops");
+const update = require("./update_ops");
 
 const BASE_PORT = 8321;
 const MAX_PORT_ATTEMPTS = 10;
@@ -28,11 +29,19 @@ const MIME_TYPES = {
   ".gif": "image/gif",
   ".webp": "image/webp",
   ".bmp": "image/bmp",
+  ".jfif": "image/jpeg",
+  ".heic": "image/heic",
   ".mp4": "video/mp4",
   ".mov": "video/quicktime",
   ".webm": "video/webm",
   ".mkv": "video/x-matroska",
   ".avi": "video/x-msvideo",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".wav": "audio/wav",
+  ".amr": "audio/amr",
+  ".silk": "application/octet-stream",
+  ".pdf": "application/pdf",
 };
 
 const sendJson = (response, statusCode, payload) => {
@@ -80,8 +89,10 @@ const isLocalHost = (request) => {
 
 const isAuthorized = (request) => request.headers["x-cc-token"] === token;
 
-const serveStaticFile = (response, filePath) => {
-  const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()];
+const serveStaticFile = (response, filePath, fallbackType) => {
+  // fallbackType lets run-media with unusual/absent extensions download
+  // instead of 404ing (QQ caches occasionally store extension-less originals).
+  const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()] ?? fallbackType;
   if (contentType === undefined || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
     sendError(response, 404, "Not found");
     return;
@@ -107,7 +118,7 @@ const serveRunsFile = (response, urlPath) => {
     return;
   }
 
-  serveStaticFile(response, resolved);
+  serveStaticFile(response, resolved, "application/octet-stream");
 };
 
 const serveIndex = (response) => {
@@ -297,6 +308,22 @@ const handleApi = async (request, response, url) => {
 
     if (request.method === "POST" && url.pathname === "/api/llm/models") {
       sendJson(response, 200, { models: await settings.fetchLlmModels() });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/update/check") {
+      sendJson(response, 200, await update.checkUpdate());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/update/apply") {
+      sendJson(response, 200, await update.applyUpdate());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/settings/store") {
+      const body = await readBody(request);
+      sendJson(response, 200, settings.saveStoreConfig(body));
       return;
     }
 

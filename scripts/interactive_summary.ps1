@@ -17,7 +17,7 @@ function Read-RequiredText {
 
     $value = Read-Host -Prompt $Prompt
     if ([string]::IsNullOrWhiteSpace($value)) {
-        throw "Missing required input: $Prompt"
+        throw "必填内容不能为空: $Prompt"
     }
 
     $value.Trim()
@@ -51,7 +51,7 @@ function Get-TimeRangeArgs {
             }
         }
         default {
-            throw "Unknown choice '$rangeChoice'. Choose 1, 2, or 3."
+            throw "无法识别的选项 '$rangeChoice'，请输入 1、2 或 3。"
         }
     }
 
@@ -136,6 +136,6 @@ switch ($choice) {
         & "$PSScriptRoot\cleanup_generated_data.ps1"
     }
     default {
-        throw "Unknown choice '$choice'. Choose 1-8."
+        throw "无法识别的选项 '$choice'，请输入 1-8。"
     }
 }

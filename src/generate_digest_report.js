@@ -39,6 +39,15 @@ const loadManifest = (runDir) => {
   return fs.existsSync(manifestPath) ? readJson(manifestPath) : [];
 };
 
+const scanWarningText = (combined) => {
+  if (combined.scanTruncated !== true && combined.scanAborted !== true) {
+    return null;
+  }
+  const reason = combined.scanAborted === true ? "数据库副本读取错误过多，扫描提前中止" : "扫描行数达到上限";
+  const missing = combined.coveredFromHkt ? `早于 ${combined.coveredFromHkt} 的消息可能缺失` : "请求范围内的消息可能大量缺失";
+  return `${reason}，${missing}。可提高 config\\defaults.json 的 defaultScanLimit，或缩小时间范围后重跑。`;
+};
+
 const localTopicLine = (analysis) =>
   (analysis.topics ?? [])
     .filter((topic) => topic.count > 0 && topic.id !== "misc" && topic.id !== "media")
@@ -64,6 +73,10 @@ const buildGroupView = (groupId, analysis, manifest) => {
     groupId,
     name,
     label: name === groupId ? groupId : `${name}(${groupId})`,
+    llmBasisNote:
+      Number.isFinite(llm?.provider?.messageLines) && llm.provider.messageLines < (analysis.parsedTextMessages ?? 0)
+        ? `AI 摘要基于最近 ${llm.provider.messageLines} 条`
+        : null,
     textMessages: analysis.parsedTextMessages ?? 0,
     mediaMessages: analysis.parsedMediaMessages ?? 0,
     firstHkt: analysis.firstMessageHkt ?? null,
@@ -147,6 +160,7 @@ const writeMarkdown = (combined, groups, outputPath) => {
     `- 群数量: ${groups.length}`,
     `- 文本消息: ${combined.parsedTextMessages ?? 0}`,
     `- 媒体消息: ${combined.parsedMediaMessages ?? 0}`,
+    ...(scanWarningText(combined) !== null ? ["", `> ⚠ **扫描不完整**：${scanWarningText(combined)}`] : []),
     "",
     "## 总览",
     "",
@@ -310,6 +324,7 @@ const renderGroupSection = (group) => `
         `媒体 ${group.mediaMessages}`,
         `${group.firstHkt ?? "无"} - ${group.lastHkt ?? "无"}`,
         group.llm !== null ? "LLM 主题" : "本地分组",
+        ...(group.llmBasisNote !== null ? [group.llmBasisNote] : []),
       ])}
     </div>
     <p class="group-summary">${escapeHtml(group.summaryLine)}</p>
@@ -422,6 +437,9 @@ const writeHtml = (combined, groups, outputMarkdown) => {
     ${groups.map((group) => `<a href="#group-${escapeHtml(group.groupId)}">${escapeHtml(group.name)}</a>`).join("")}
   </nav>
   <main>
+    ${scanWarningText(combined) !== null
+      ? `<section style="border-color:var(--risk)"><h2 style="color:var(--risk)">⚠ 扫描不完整</h2><p>${escapeHtml(scanWarningText(combined))}</p></section>`
+      : ""}
     <div class="cards">${renderOverviewCards(groups)}</div>
     <section>
       <h2>待处理事项（全部群）</h2>

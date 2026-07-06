@@ -117,16 +117,26 @@ const normalizeFilePath = (value) =>
     .replace(/[，。！？、；：）)]+$/gu, "")
     .trim();
 
+// Longest-first within a stem (jpeg before jpg, docx before doc) so regex
+// alternation never matches a prefix and leaves the tail behind.
+const IMAGE_EXTENSIONS = ["jpeg", "jpg", "png", "gif", "webp", "bmp", "jfif", "heic"];
+const VIDEO_EXTENSIONS = ["mp4", "mov", "avi", "mkv", "webm"];
+const AUDIO_EXTENSIONS = ["amr", "silk", "m4a", "wav", "mp3"];
+const DOC_EXTENSIONS = ["pdf", "zip", "7z", "rar", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "txt", "apk"];
+
 const getMediaKind = (extension, localPath) => {
-  const lowerExtension = extension.toLowerCase();
+  const ext = extension.toLowerCase().replace(".", "");
   const lowerPath = localPath.toLowerCase();
   if (lowerPath.includes("\\emoji\\") || lowerPath.includes("/emoji/")) {
     return "emoji";
   }
-  if ([".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(lowerExtension)) {
+  if (AUDIO_EXTENSIONS.includes(ext) || lowerPath.includes("\\ptt\\") || lowerPath.includes("/ptt/")) {
+    return "audio";
+  }
+  if (VIDEO_EXTENSIONS.includes(ext)) {
     return "video";
   }
-  if ([".jpg", ".jpeg", ".png", ".gif", ".webp"].includes(lowerExtension)) {
+  if (IMAGE_EXTENSIONS.includes(ext)) {
     return "image";
   }
   return "file";
@@ -146,13 +156,13 @@ const extractMediaRefs = (hex) => {
   const bodyText = getBodyText(hex);
   const refs = [];
   const seen = new Set();
-  const localPathPattern = /[A-Za-z]:\\[^\u0000-\u001f"'<>|]+?\.(?:jpg|jpeg|png|gif|webp|mp4|mov|avi|mkv)/giu;
-  const filePattern = /(?:\{?([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})\}?|([a-fA-F0-9]{32}))\.(jpg|jpeg|png|gif|webp|mp4|mov|avi|mkv)/giu;
+  const localPathPattern = /[A-Za-z]:\\[^\u0000-\u001f"'<>|]+?\.(?:jpeg|jpg|png|gif|webp|bmp|jfif|heic|mp4|mov|avi|mkv|webm|amr|silk|m4a|wav|mp3|pdf|zip|7z|rar|docx|doc|xlsx|xls|pptx|ppt|txt|apk)/giu;
+  const filePattern = /(?:\{?([a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12})\}?|([a-fA-F0-9]{32}))\.(jpeg|jpg|png|gif|webp|bmp|jfif|heic|mp4|mov|avi|mkv|webm|amr|silk|m4a|wav|mp3|pdf|zip|7z|rar|docx|doc|xlsx|xls|pptx|ppt|txt|apk)/giu;
   const urlPattern = /https?:\/\/[^\s<>"'）)]+/giu;
 
   for (const match of bodyText.matchAll(localPathPattern)) {
     const localPath = normalizeFilePath(match[0]);
-    const extensionMatch = localPath.match(/\.(jpg|jpeg|png|gif|webp|mp4|mov|avi|mkv)$/iu);
+    const extensionMatch = localPath.match(/\.(jpeg|jpg|png|gif|webp|bmp|jfif|heic|mp4|mov|avi|mkv|webm|amr|silk|m4a|wav|mp3|pdf|zip|7z|rar|docx|doc|xlsx|xls|pptx|ppt|txt|apk)$/iu);
     if (extensionMatch === null) {
       continue;
     }
@@ -186,7 +196,7 @@ const extractMediaRefs = (hex) => {
 
   for (const match of bodyText.matchAll(urlPattern)) {
     const url = match[0];
-    const extensionMatch = url.match(/\.(jpg|jpeg|png|gif|webp|mp4|mov|avi|mkv)(?:[?#].*)?$/iu);
+    const extensionMatch = url.match(/\.(jpeg|jpg|png|gif|webp|bmp|jfif|heic|mp4|mov|avi|mkv|webm)(?:[?#].*)?$/iu);
     if (extensionMatch === null) {
       continue;
     }
@@ -292,8 +302,20 @@ const exportMessages = (args, key) => {
     const endUnix = BigInt(args.endUnix);
     const chunkSize = 1000;
     const maxQueryErrors = 50;
+    // Row ids are insert-ordered, so a long consecutive streak of rows older
+    // than the window means the scan has walked past it and can stop early.
+    const olderStreakLimit = 3000;
+    // Error skip step: ~0.25s of row-id space at first, doubling on repeated
+    // failures up to the old fixed step. A fixed 1e12 step used to silently
+    // drop ~4 minutes of history per transient error.
+    const minSkipStep = 1000000000n;
+    const maxSkipStep = 1000000000000n;
     let cursor = 9223372036854775807n;
+    let skipStep = minSkipStep;
     let scanned = 0;
+    let olderStreak = 0;
+    let oldestScannedSentAt = null;
+    let stopReason = "scan-limit";
     const messages = [];
     const mediaMessages = [];
     const errors = [];
@@ -305,6 +327,7 @@ const exportMessages = (args, key) => {
       } catch (error) {
         errors.push({
           cursor: cursor.toString(),
+          skippedRowIdBand: skipStep.toString(),
           message: error.message,
           code: error.code,
         });
@@ -312,13 +335,17 @@ const exportMessages = (args, key) => {
         // retry loop would shrink the cursor ~9 million times before exiting.
         if (errors.length >= maxQueryErrors) {
           errors.push({ cursor: cursor.toString(), message: `Aborted scan after ${maxQueryErrors} query errors.`, code: "SCAN_ABORTED" });
+          stopReason = "aborted";
           break;
         }
-        cursor -= 1000000000000n;
+        cursor -= skipStep;
+        skipStep = skipStep * 2n > maxSkipStep ? maxSkipStep : skipStep * 2n;
         continue;
       }
+      skipStep = minSkipStep;
 
       if (rows.length === 0) {
+        stopReason = "table-end";
         break;
       }
 
@@ -327,6 +354,12 @@ const exportMessages = (args, key) => {
         cursor = BigInt(row.row_id);
 
         const sentAt = BigInt(row.sent_at);
+        const sentAtNumber = Number(row.sent_at);
+        if (Number.isFinite(sentAtNumber) && sentAtNumber > 0 && (oldestScannedSentAt === null || sentAtNumber < oldestScannedSentAt)) {
+          oldestScannedSentAt = sentAtNumber;
+        }
+        olderStreak = sentAt < startUnix ? olderStreak + 1 : 0;
+
         const matchedGroupId = args.groupIds.find((groupId) => {
           const groupIdNumber = groupIdNumbers.get(groupId);
           return row.group_id_text === groupId || (row.group_id_int !== null && BigInt(row.group_id_int) === groupIdNumber);
@@ -350,7 +383,10 @@ const exportMessages = (args, key) => {
             memberUin: member?.uin ?? null,
           };
 
-          if (row.msg_type1 === 2n && row.msg_type2 === 1n) {
+          // Type 2 covers normal chat messages across all subtypes (plain
+          // text, replies/quotes, mixed text+image, forwards) — extract text
+          // from any of them; empty extractions are filtered downstream.
+          if (row.msg_type1 === 2n) {
             messages.push({
               ...messageBase,
               text: getMessageText(row.body_hex),
@@ -368,12 +404,37 @@ const exportMessages = (args, key) => {
         }
       }
 
+      if (olderStreak >= olderStreakLimit) {
+        stopReason = "window-done";
+        break;
+      }
       if (rows.length < chunkSize) {
+        stopReason = "table-end";
         break;
       }
     }
 
     const sortByTimeAndRow = (left, right) => left.sentAt - right.sentAt || Number(BigInt(left.rowId) - BigInt(right.rowId));
+
+    // Honest coverage: when the scan stopped before walking the whole window
+    // (row budget or corrupt copy), report the oldest time it actually
+    // reached, so the store never records unscanned time as covered.
+    const scanComplete = stopReason === "table-end" || stopReason === "window-done";
+    const scanAborted = stopReason === "aborted";
+    let coveredFromUnix = args.startUnix;
+    if (!scanComplete) {
+      coveredFromUnix = oldestScannedSentAt === null ? null : Math.max(args.startUnix, oldestScannedSentAt);
+      if (coveredFromUnix !== null && coveredFromUnix >= args.endUnix) {
+        coveredFromUnix = null;
+      }
+    }
+
+    if (!scanComplete) {
+      const reasonText = scanAborted ? "数据库副本读取错误过多，扫描提前中止" : "扫描行数达到上限";
+      const missText = coveredFromUnix === null ? "请求的整个时间范围都可能缺失" : `早于该时间点的消息可能缺失`;
+      console.log(`warning=scan-incomplete reason=${stopReason} coveredFromUnix=${coveredFromUnix ?? "none"}`);
+      console.log(`警告：${reasonText}，${missText}。可在 config\\defaults.json 提高 defaultScanLimit，或缩小时间范围后重试。`);
+    }
 
     const output = {
       groupIds: args.groupIds,
@@ -381,6 +442,10 @@ const exportMessages = (args, key) => {
       startUnix: args.startUnix,
       endUnix: args.endUnix,
       scanned,
+      stopReason,
+      scanTruncated: !scanComplete && !scanAborted,
+      scanAborted,
+      coveredFromUnix,
       matched: messages.length,
       matchedMedia: mediaMessages.length,
       errors,

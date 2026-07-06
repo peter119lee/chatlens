@@ -4,7 +4,11 @@ const path = require("node:path");
 const { toolRoot } = require("./toolkit_state");
 
 const MAX_LOG_LINES = 4000;
-const TIME_TEXT_PATTERN = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/u;
+const TIME_TEXT_PATTERN = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*(?:Z|[+-]\d{2}:\d{2}))?$/u;
+// UI times are Beijing time (UTC+8) everywhere; stamp the offset explicitly so
+// PowerShell never parses them in the machine-local timezone — that used to
+// shift scan windows by hours for users outside UTC+8 (or fail the run).
+const withBeijingOffset = (text) => (/(?:Z|[+-]\d{2}:\d{2})\s*$/u.test(text) ? text : `${text} +08:00`);
 
 let currentJob = null;
 let jobCounter = 0;
@@ -221,8 +225,8 @@ const buildRangeArgs = (range) => {
     if (end.length > 0 && !TIME_TEXT_PATTERN.test(end)) {
       throw new Error(`无效的结束时间: ${end}`);
     }
-    const endArg = end.length > 0 ? ` -EndTime ${quotePs(end)}` : "";
-    return `-StartTime ${quotePs(start)}${endArg}`;
+    const endArg = end.length > 0 ? ` -EndTime ${quotePs(withBeijingOffset(end))}` : "";
+    return `-StartTime ${quotePs(withBeijingOffset(start))}${endArg}`;
   }
   throw new Error(`未知的时间范围类型: ${range?.type}`);
 };

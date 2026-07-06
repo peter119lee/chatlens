@@ -39,7 +39,13 @@ const walkFiles = (rootDir, visit) => {
   const stack = [rootDir];
   while (stack.length > 0) {
     const current = stack.pop();
-    const entries = fs.readdirSync(current, { withFileTypes: true });
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      // An unreadable cache subfolder must not kill the whole media export.
+      continue;
+    }
     for (const entry of entries) {
       const entryPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
@@ -149,15 +155,25 @@ const main = () => {
   const index = buildMediaIndex(args.ntDataDir);
   const manifest = [];
   let copied = 0;
+  let failedCopies = 0;
   let refIndex = 0;
 
   for (const message of mediaMessages) {
     for (const ref of message.mediaRefs ?? []) {
       refIndex += 1;
       const sourcePath = findSourcePath(ref, index, args.formats);
-      const copiedPath = sourcePath === null ? null : copyMedia(message, ref, sourcePath, args.outputDir, refIndex);
-      if (copiedPath !== null) {
-        copied += 1;
+      let copiedPath = null;
+      let copyError = null;
+      if (sourcePath !== null) {
+        // One locked or just-purged file must not abort the remaining copies
+        // (a single throw here used to fail the whole run with no manifest).
+        try {
+          copiedPath = copyMedia(message, ref, sourcePath, args.outputDir, refIndex);
+          copied += 1;
+        } catch (error) {
+          copyError = error.message;
+          failedCopies += 1;
+        }
       }
 
       manifest.push({
@@ -172,9 +188,14 @@ const main = () => {
         requestedExtension: ref.extension,
         sourcePath,
         copiedPath,
+        copyError,
         url: ref.url,
       });
     }
+  }
+
+  if (failedCopies > 0) {
+    console.warn(`警告：${failedCopies} 个媒体文件复制失败（可能被占用或已被 QQ 清理），已跳过，其余照常导出。`);
   }
 
   const manifestPath = path.join(args.outputDir, "media-manifest.json");
@@ -196,6 +217,7 @@ const main = () => {
         manifestTextPath,
         refs: manifest.length,
         copied,
+        failedCopies,
         missing: manifest.length - copied,
       },
       null,

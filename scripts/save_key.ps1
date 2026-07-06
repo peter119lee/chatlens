@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 Set-StrictMode -Version 2.0
@@ -10,7 +10,7 @@ function Save-ManualKey {
     $secretDir = Join-Path $env:APPDATA 'QQSummaryTools'
     $secretPath = Join-Path $secretDir 'ntqq-db-key.dpapi'
 
-    $secure = Read-Host -Prompt 'Paste NTQQ_DB_KEY for this Windows user' -AsSecureString
+    $secure = Read-Host -Prompt '粘贴 NTQQ_DB_KEY（只会加密保存在当前 Windows 用户下）' -AsSecureString
     $encrypted = ConvertFrom-SecureString -SecureString $secure
 
     New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
@@ -20,12 +20,12 @@ function Save-ManualKey {
 }
 
 Write-Output ''
-Write-Output 'Save QQNT DB key'
-Write-Output '1. Auto-detect from existing memory-candidates.txt'
-Write-Output '2. Paste NTQQ_DB_KEY manually'
+Write-Output '保存 QQNT 数据库密钥'
+Write-Output '1. 从已有的 memory-candidates.txt 自动检测'
+Write-Output '2. 手动粘贴 NTQQ_DB_KEY'
 Write-Output ''
 
-$choice = Read-Host -Prompt 'Choose 1/2'
+$choice = Read-Host -Prompt '选择 1/2'
 
 switch ($choice) {
     '1' {
@@ -35,6 +35,6 @@ switch ($choice) {
         Save-ManualKey
     }
     default {
-        throw "Unknown choice '$choice'. Choose 1 or 2."
+        throw "无法识别的选项 '$choice'，请输入 1 或 2。"
     }
 }

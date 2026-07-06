@@ -28,6 +28,10 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$EndTime,
 
+    # 从消息库 scan_ranges 的记录点续扫（定时任务用，停机多久都不漏）。
+    [Parameter(Mandatory = $false)]
+    [switch]$SinceLastRecord,
+
     [Parameter(Mandatory = $false)]
     [int]$ScanLimit,
 
@@ -100,7 +104,7 @@ function Get-SelectedGroupIds {
 
     $selected = ConvertTo-GroupIdList -Values $values
     if (@($selected).Length -eq 0) {
-        throw 'No QQ group ids were provided. Pass -GroupIds "123,456" or -GroupListFile ".\groups.txt".'
+        throw '没有可用的群号。请传 -GroupIds "123,456"、-GroupListFile ".\groups.txt"，或使用 -UseWatchlist。'
     }
 
     @($selected)
@@ -128,7 +132,7 @@ function Get-TimeRange {
 
     if (-not [string]::IsNullOrWhiteSpace($RawStartTime) -or -not [string]::IsNullOrWhiteSpace($RawEndTime)) {
         if ([string]::IsNullOrWhiteSpace($RawStartTime)) {
-            throw 'StartTime is required when EndTime is provided.'
+            throw '提供了结束时间时必须同时提供开始时间（-StartTime）。'
         }
 
         $startUnix = ConvertTo-UnixTimeFromLocalText -Text $RawStartTime
@@ -155,7 +159,7 @@ function Get-TimeRange {
 
     $actualDays = if ($RawDays -gt 0) { $RawDays } else { $DefaultDays }
     if ($actualDays -le 0) {
-        throw "No valid time range was provided. Pass -SinceHours, -Days, or -StartTime. DefaultDays=$DefaultDays"
+        throw "没有有效的时间范围。请传 -SinceHours、-Days 或 -StartTime。DefaultDays=$DefaultDays"
     }
 
     [pscustomobject]@{
@@ -206,7 +210,7 @@ function Get-LlmOptions {
 
     $llmProperty = $Config.PSObject.Properties['llm']
     if ($null -eq $llmProperty) {
-        throw 'Config is missing llm settings. Add config.defaults.json llm.provider/baseUrl/model/apiKeyEnv/maxMessages/maxChars or pass LLM parameters explicitly.'
+        throw '配置缺少 llm 设置。请在 config\defaults.json 补充 llm.provider/baseUrl/model/apiKeyEnv/maxMessages/maxChars，或显式传 LLM 参数。'
     }
 
     $llmConfig = $llmProperty.Value
@@ -219,7 +223,7 @@ function Get-LlmOptions {
 
     $provider = if (-not [string]::IsNullOrWhiteSpace($RawProvider)) { $RawProvider } elseif ($null -ne $providerConfig) { [string]$providerConfig.Value } else { '' }
     if ([string]::IsNullOrWhiteSpace($provider)) {
-        throw 'LLM provider is required when UseLlm is set.'
+        throw '启用 UseLlm 时必须提供 LLM provider。'
     }
 
     switch ($provider) {
@@ -231,11 +235,11 @@ function Get-LlmOptions {
             $maxChars = if ($RawMaxChars -gt 0) { $RawMaxChars } elseif ($null -ne $maxCharsConfig) { [int]$maxCharsConfig.Value } else { 50000 }
 
             if ([string]::IsNullOrWhiteSpace($baseUrl)) {
-                throw 'LLM baseUrl is required for provider deepseek.'
+                throw 'provider 为 deepseek 时必须提供 LLM baseUrl。'
             }
 
             if ([string]::IsNullOrWhiteSpace($model)) {
-                throw 'LLM model is required for provider deepseek.'
+                throw 'provider 为 deepseek 时必须提供 LLM model。'
             }
 
             $configuredApiKey = [System.Environment]::GetEnvironmentVariable($apiKeyEnv, 'Process')
@@ -258,7 +262,7 @@ function Get-LlmOptions {
             }
         }
         default {
-            throw "Unsupported LLM provider '$provider'. Supported providers: deepseek."
+            throw "不支持的 LLM 提供商 '$provider'。目前支持: deepseek。"
         }
     }
 }
@@ -278,7 +282,7 @@ function Remove-GeneratedCleanDb {
     $target = (Resolve-Path -LiteralPath $cleanDb).Path
     $expectedPrefix = $runRoot.TrimEnd('\') + '\'
     if (-not $target.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove clean-db because it is outside the run directory. RunDir=$runRoot Target=$target"
+        throw "拒绝删除 run 目录之外的 clean-db。RunDir=$runRoot Target=$target"
     }
 
     Remove-Item -LiteralPath $target -Recurse -Force
@@ -305,13 +309,13 @@ $actualConfigPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
 $config = Read-ToolkitConfig -Path $actualConfigPath
 $actualMode = if ([string]::IsNullOrWhiteSpace($Mode)) { 'time' } else { $Mode }
 if ($actualMode -eq 'unread') {
-    throw 'Unread mode is not enabled yet because QQNT unread state has not been decoded reliably. Use -Mode time with -SinceHours, -Days, or -StartTime/-EndTime.'
+    throw '未读模式暂不可用（QQNT 的未读状态还没有可靠解码方式）。请用 -SinceHours、-Days 或 -StartTime/-EndTime 按时间范围总结。'
 }
 
 if ($UseWatchlist.IsPresent) {
     $watchlistEntries = Get-WatchlistEntries -Config $config
     if (@($watchlistEntries).Length -eq 0) {
-        throw 'The watchlist in config\defaults.json is empty. Run scripts\manage_watchlist.ps1 (menu option 4) to pick your groups first.'
+        throw '关注群列表为空。请先在控制台「关注群」页添加，或运行 scripts\manage_watchlist.ps1 选择群。'
     }
     $GroupIds = @($watchlistEntries | ForEach-Object { $_.groupId })
 }
@@ -332,15 +336,47 @@ if (-not $hasExplicitTimeRange) {
 
 $selectedGroupIds = Get-SelectedGroupIds -RawGroupIds $GroupIds -RawGroupListFile $GroupListFile -Config $config
 $actualScanLimit = if ($ScanLimit -gt 0) { $ScanLimit } else { [int]$config.defaultScanLimit }
-$timeRange = Get-TimeRange `
-    -RawStartTime $StartTime `
-    -RawEndTime $EndTime `
-    -RawSinceHours $SinceHours `
-    -RawDays $Days `
-    -DefaultDays ([int]$config.defaultDays)
+
+$timeRange = $null
+if ($SinceLastRecord.IsPresent -and -not $hasExplicitTimeRange) {
+    # 从消息库的扫描记录续扫（重叠 10 分钟去重，上限回看 30 天）；没有记录时回退最近 26 小时。
+    $storeDb = Join-Path $toolRoot 'store\messages.db'
+    $coverageStart = $null
+    if (Test-Path -LiteralPath $storeDb) {
+        $coverageOutput = node (Join-Path $toolRoot 'src\query_store_range.js') $storeDb (Join-GroupIdsCsv -GroupIds $selectedGroupIds)
+        if ($LASTEXITCODE -eq 0) {
+            $joined = ($coverageOutput | Out-String)
+            if ($joined -match 'coverageStart=(\d+)') {
+                $coverageStart = [long]$Matches[1]
+            }
+        }
+    }
+    $nowUnix = [DateTimeOffset]::Now.ToUnixTimeSeconds()
+    if ($null -ne $coverageStart) {
+        $minStart = $nowUnix - 30 * 24 * 3600
+        if ($coverageStart -lt $minStart) { $coverageStart = $minStart }
+        $timeRange = [pscustomobject]@{
+            StartUnix = $coverageStart - 600
+            EndUnix = $nowUnix
+            Label = 'since-store'
+        }
+        Write-Host '本次从上次记录点继续扫描（重叠 10 分钟用于去重）。'
+    } else {
+        Write-Warning '还没有本地扫描记录可作起点，本次改用最近 26 小时。'
+        $SinceHours = 26
+    }
+}
+if ($null -eq $timeRange) {
+    $timeRange = Get-TimeRange `
+        -RawStartTime $StartTime `
+        -RawEndTime $EndTime `
+        -RawSinceHours $SinceHours `
+        -RawDays $Days `
+        -DefaultDays ([int]$config.defaultDays)
+}
 
 if ([long]$timeRange.StartUnix -ge [long]$timeRange.EndUnix) {
-    throw "Invalid time range. Start time must be earlier than end time. StartUnix=$($timeRange.StartUnix) EndUnix=$($timeRange.EndUnix)"
+    throw "时间范围无效：开始时间必须早于结束时间。StartUnix=$($timeRange.StartUnix) EndUnix=$($timeRange.EndUnix)"
 }
 
 $runId = Get-RunId -SelectedGroupIds $selectedGroupIds -ActualMode $actualMode -RangeLabel ([string]$timeRange.Label)
@@ -368,7 +404,7 @@ try {
                 throw
             }
             # LLM comes from config defaults here; a missing key should not block the whole run.
-            Write-Warning "Skipping LLM topics for this run: $($_.Exception.Message)"
+            Write-Warning "本次跳过 AI 总结（$($_.Exception.Message)），报告将使用本地分组。"
         }
     }
     if ($null -ne $llmOptions) {
@@ -381,7 +417,7 @@ try {
         $ntDbDir = [string]$config.ntDbDir
         npm run prepare-clean-dbs -- -NtDbDir $ntDbDir -RunDir $runDir
         if ($LASTEXITCODE -ne 0) {
-            throw "prepare-clean-dbs failed. ExitCode=$LASTEXITCODE RunDir=$runDir"
+            throw "复制数据库副本失败（ExitCode=$LASTEXITCODE）。请确认设置页的 QQ 数据库路径正确、磁盘空间充足。"
         }
 
         $storeRetentionDays = 3
@@ -417,18 +453,29 @@ try {
 
         & "$PSScriptRoot\summarize_groups.ps1" @summaryArgs
         if ($LASTEXITCODE -ne 0) {
-            throw "summarize-groups failed. ExitCode=$LASTEXITCODE RunDir=$runDir"
+            throw "导出与分析失败（ExitCode=$LASTEXITCODE）。RunDir=$runDir"
         }
 
         if ($effectiveExportMedia) {
-            $defaultFormats = [string](Get-RunDefault -Config $config -Name 'mediaFormats' -Fallback 'jpg,jpeg,png,gif,webp,mp4,mov,avi,mkv')
-            $formatsCsv = if ([string]::IsNullOrWhiteSpace($MediaFormats)) { $defaultFormats } else { $MediaFormats }
-            npm run export-media -- `
-                -RunDir $runDir `
-                -NtDataDir ([string]$config.ntDataDir) `
-                -FormatsCsv $formatsCsv
-            if ($LASTEXITCODE -ne 0) {
-                throw "export-media failed. ExitCode=$LASTEXITCODE RunDir=$runDir"
+            # 媒体导出是可降级步骤：nt_data 未配置/不存在或导出失败时警告后继续出报告，
+            # 不再让整个运行失败（新用户首跑最常见的坑）。
+            $ntDataDirValue = ''
+            $ntDataProperty = $config.PSObject.Properties['ntDataDir']
+            if ($null -ne $ntDataProperty -and $null -ne $ntDataProperty.Value) {
+                $ntDataDirValue = [string]$ntDataProperty.Value
+            }
+            if ([string]::IsNullOrWhiteSpace($ntDataDirValue) -or -not (Test-Path -LiteralPath $ntDataDirValue)) {
+                Write-Warning '未配置或找不到 nt_data 目录，本次跳过媒体导出（报告不受影响）。可在设置页填写 QQ 数据库路径。'
+            } else {
+                $defaultFormats = [string](Get-RunDefault -Config $config -Name 'mediaFormats' -Fallback 'jpg,jpeg,png,gif,webp,mp4,mov,avi,mkv')
+                $formatsCsv = if ([string]::IsNullOrWhiteSpace($MediaFormats)) { $defaultFormats } else { $MediaFormats }
+                npm run export-media -- `
+                    -RunDir $runDir `
+                    -NtDataDir $ntDataDirValue `
+                    -FormatsCsv $formatsCsv
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "媒体导出失败（ExitCode=$LASTEXITCODE），本次报告将没有本地媒体预览，其余不受影响。"
+                }
             }
         }
     } finally {
@@ -441,12 +488,12 @@ try {
     if (Test-Path -LiteralPath (Join-Path $runDir 'analysis\groups')) {
         node (Join-Path $toolRoot 'src\generate_digest_report.js') $runDir $reportPath
         if ($LASTEXITCODE -ne 0) {
-            throw "generate_digest_report failed. ExitCode=$LASTEXITCODE RunDir=$runDir"
+            throw "生成多群摘要报告失败（ExitCode=$LASTEXITCODE）。RunDir=$runDir"
         }
     } else {
         node (Join-Path $toolRoot 'src\generate_report.js') $analysisJson $messagesText $reportPath
         if ($LASTEXITCODE -ne 0) {
-            throw "generate_report failed. ExitCode=$LASTEXITCODE AnalysisJson=$analysisJson"
+            throw "生成报告失败（ExitCode=$LASTEXITCODE）。AnalysisJson=$analysisJson"
         }
     }
     $cleanDbRemoved = if ($KeepCleanDb.IsPresent) { $false } else { Remove-GeneratedCleanDb -RunDir $runDir }
@@ -455,22 +502,22 @@ try {
     $reportCenter = Join-Path ([string]$config.reportsDir) 'index.html'
     node (Join-Path $toolRoot 'src\generate_report_center.js') $actualConfigPath $reportCenter
     if ($LASTEXITCODE -ne 0) {
-        throw "generate_report_center failed. ExitCode=$LASTEXITCODE ReportCenter=$reportCenter"
+        throw "生成报告中心失败（ExitCode=$LASTEXITCODE）。ReportCenter=$reportCenter"
     }
 
     Write-Output ''
-    Write-Output 'DONE'
-    Write-Output "Report center: $(ConvertTo-FileUrl -Path $reportCenter)"
-    Write-Output "Open report HTML: $(ConvertTo-FileUrl -Path ($reportPath -replace '\.md$', '.html'))"
-    Write-Output "Open report Markdown: $reportPath"
-    Write-Output "Run folder: $runDir"
+    Write-Output '完成'
+    Write-Output "报告中心: $(ConvertTo-FileUrl -Path $reportCenter)"
+    Write-Output "HTML 报告: $(ConvertTo-FileUrl -Path ($reportPath -replace '\.md$', '.html'))"
+    Write-Output "Markdown 报告: $reportPath"
+    Write-Output "运行文件夹: $runDir"
     if (Test-Path -LiteralPath $mediaManifest) {
-        Write-Output "Media folder: $mediaDir"
-        Write-Output "Media manifest: $mediaManifest"
+        Write-Output "媒体文件夹: $mediaDir"
+        Write-Output "媒体清单: $mediaManifest"
     } else {
-        Write-Output 'Media folder: not exported. Use -ExportMedia if you need local media files.'
+        Write-Output '媒体：本次未导出本地媒体文件（需要时在运行页或 -ExportMedia 开启）。'
     }
-    Write-Output "Temporary clean-db removed: $cleanDbRemoved"
+    Write-Output "临时数据库副本已删除: $cleanDbRemoved"
     Write-Output ''
     Write-Output "runDir=$runDir"
     Write-Output "reportPath=$reportPath"

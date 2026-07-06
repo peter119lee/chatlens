@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$RunDir,
@@ -17,7 +17,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 if ($Days -le 0) {
-    throw "Invalid Days. It must be greater than zero. Days=$Days"
+    throw "Days 无效，必须大于 0。Days=$Days"
 }
 
 $now = [DateTimeOffset]::Now

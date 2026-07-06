@@ -70,10 +70,13 @@ const enableSchedule = async ({ time, sinceHours }) => {
   const windowHours = Number.isInteger(hours) && hours >= 1 && hours <= 168 ? hours : 26;
 
   const script = path.join(state.toolRoot, "scripts", "run_one_click_summary.ps1");
+  // -SinceLastRecord continues from the store's coverage instead of a fixed
+  // window, so a machine that was off for days doesn't leave a gap; with no
+  // store record yet the script itself falls back to the last 26 hours.
   const psArgument = [
     "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"\"" + script + "\"\"",
     "-UseWatchlist",
-    `-SinceHours ${windowHours}`,
+    "-SinceLastRecord",
     "-NoOpenReport",
   ].join(" ");
 
