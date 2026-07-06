@@ -413,6 +413,14 @@ const exportMessages = (args, key) => {
     const groupNames = fetchGroupNames(args.groupInfoDatabasePath, key, args.groupIds);
 
     db.defaultSafeIntegers(true);
+    // group_msg_table row ids (40001) are GLOBAL insert order, NOT time order:
+    // syncing a group's history inserts old messages with brand-new (high) row
+    // ids, so scanning the whole 7M-row table newest-first and stopping on a
+    // streak of out-of-window rows aborted long before a busy group's in-window
+    // history was reached — one backfilled batch near the top hid >99% of the
+    // messages. Fetch each group straight through the [40027] (group id) index
+    // instead: it returns only that group's rows (~10^5, sub-second), and we
+    // window-filter in JS, also sidestepping corrupt pages a full scan would hit.
     const stmt = db.prepare(
       [
         "select",
@@ -432,86 +440,71 @@ const exportMessages = (args, key) => {
         "  [40093] as sender_name2,",
         "  hex([40800]) as body_hex",
         "from group_msg_table",
-        "where [40001] < ?",
-        "order by [40001] desc",
-        "limit ?",
+        "where [40027] = ?",
+        "order by [40003] desc",
       ].join("\n"),
     );
 
-    const groupIdNumbers = new Map(args.groupIds.map((groupId) => [groupId, BigInt(groupId)]));
     const startUnix = BigInt(args.startUnix);
     const endUnix = BigInt(args.endUnix);
-    const chunkSize = 1000;
-    const maxQueryErrors = 50;
-    // Row ids are insert-ordered, so a long consecutive streak of rows older
-    // than the window means the scan has walked past it and can stop early.
-    const olderStreakLimit = 3000;
-    // Error skip step: ~0.25s of row-id space at first, doubling on repeated
-    // failures up to the old fixed step. A fixed 1e12 step used to silently
-    // drop ~4 minutes of history per transient error.
-    const minSkipStep = 1000000000n;
-    const maxSkipStep = 1000000000000n;
-    let cursor = 9223372036854775807n;
-    let skipStep = minSkipStep;
+    // Runaway guard only (default 1e6). Because the query is walked newest-first
+    // (msg_seq desc) a cap hit drops the OLDEST rows, so the requested window is
+    // still covered; the group is flagged incomplete regardless.
+    const perGroupScanLimit = args.scanLimit;
+    // Per-group early stop. The (40027,40003) index is walked msg_seq-DESC =
+    // newest-first, and msg_seq is monotonic with sent_at WITHIN a group
+    // (verified: 0 out-of-order rows in 20k). Unlike the global row_id order —
+    // which cross-group history backfill scrambles, the original bug — this is a
+    // safe basis to stop: once past the window into a long run of older
+    // messages, the rest is older too. The 2000 buffer absorbs any local
+    // anomaly and bounds work to ~window+2000 rows instead of the group's whole
+    // local history (which grows unbounded as QQ keeps syncing).
+    const olderStreakLimit = 2000;
+
     let scanned = 0;
-    let olderStreak = 0;
-    let oldestScannedSentAt = null;
-    let stopReason = "scan-limit";
     const messages = [];
     const mediaMessages = [];
     const errors = [];
+    // Groups whose iteration could not be completed (row cap hit or corrupt
+    // page); used below to keep coverage honest.
+    const incompleteGroups = new Set();
 
-    while (scanned < args.scanLimit) {
-      let rows;
+    for (const groupId of args.groupIds) {
+      const groupIdInt = BigInt(groupId);
+      const memberNames = memberNamesByGroup.get(groupId) ?? new Map();
+      const resolvedGroupName = groupNames.get(groupId) ?? "";
+      let groupScanned = 0;
+      let olderStreak = 0;
       try {
-        rows = stmt.all(cursor, chunkSize);
-      } catch (error) {
-        errors.push({
-          cursor: cursor.toString(),
-          skippedRowIdBand: skipStep.toString(),
-          message: error.message,
-          code: error.code,
-        });
-        // A torn/corrupt copy can fail on every page; without a budget this
-        // retry loop would shrink the cursor ~9 million times before exiting.
-        if (errors.length >= maxQueryErrors) {
-          errors.push({ cursor: cursor.toString(), message: `Aborted scan after ${maxQueryErrors} query errors.`, code: "SCAN_ABORTED" });
-          stopReason = "aborted";
-          break;
-        }
-        cursor -= skipStep;
-        skipStep = skipStep * 2n > maxSkipStep ? maxSkipStep : skipStep * 2n;
-        continue;
-      }
-      skipStep = minSkipStep;
+        // Index-driven, newest-first (msg_seq desc) walk of just this group's rows.
+        for (const row of stmt.iterate(groupIdInt)) {
+          scanned += 1;
+          groupScanned += 1;
+          if (groupScanned > perGroupScanLimit) {
+            incompleteGroups.add(groupId);
+            break;
+          }
 
-      if (rows.length === 0) {
-        stopReason = "table-end";
-        break;
-      }
+          const sentAt = BigInt(row.sent_at);
+          // Only real timestamps before the window feed the streak; sent_at<=0
+          // (system rows) and in/after-window rows reset it, so a stray 0 can
+          // never trigger a false early stop.
+          if (sentAt > 0n && sentAt < startUnix) {
+            olderStreak += 1;
+            if (olderStreak >= olderStreakLimit) {
+              break;
+            }
+            continue;
+          }
+          olderStreak = 0;
+          if (sentAt < startUnix || sentAt >= endUnix) {
+            continue;
+          }
 
-      for (const row of rows) {
-        scanned += 1;
-        cursor = BigInt(row.row_id);
-
-        const sentAt = BigInt(row.sent_at);
-        const sentAtNumber = Number(row.sent_at);
-        if (Number.isFinite(sentAtNumber) && sentAtNumber > 0 && (oldestScannedSentAt === null || sentAtNumber < oldestScannedSentAt)) {
-          oldestScannedSentAt = sentAtNumber;
-        }
-        olderStreak = sentAt < startUnix ? olderStreak + 1 : 0;
-
-        const matchedGroupId = args.groupIds.find((groupId) => {
-          const groupIdNumber = groupIdNumbers.get(groupId);
-          return row.group_id_text === groupId || (row.group_id_int !== null && BigInt(row.group_id_int) === groupIdNumber);
-        });
-
-        if (matchedGroupId !== undefined && sentAt >= startUnix && sentAt < endUnix) {
-          const memberNames = memberNamesByGroup.get(matchedGroupId) ?? new Map();
           const member = memberNames.get(row.sender_uid);
           const messageBase = {
-            groupId: matchedGroupId,
-            groupName: groupNames.get(matchedGroupId) ?? "",
+            groupId,
+            groupName: resolvedGroupName,
             rowId: toJsonValue(row.row_id),
             msgSeq: toJsonValue(row.msg_seq),
             msgType1: toJsonValue(row.msg_type1),
@@ -543,15 +536,12 @@ const exportMessages = (args, key) => {
             });
           }
         }
-      }
-
-      if (olderStreak >= olderStreakLimit) {
-        stopReason = "window-done";
-        break;
-      }
-      if (rows.length < chunkSize) {
-        stopReason = "table-end";
-        break;
+      } catch (error) {
+        // A corrupt page inside this group's rows aborts only this group's
+        // iteration: keep what we gathered, record the error, flag it
+        // incomplete, and continue so the other groups still export.
+        errors.push({ groupId, message: error.message, code: error.code });
+        incompleteGroups.add(groupId);
       }
     }
 
@@ -593,24 +583,22 @@ const exportMessages = (args, key) => {
 
     const sortByTimeAndRow = (left, right) => left.sentAt - right.sentAt || Number(BigInt(left.rowId) - BigInt(right.rowId));
 
-    // Honest coverage: when the scan stopped before walking the whole window
-    // (row budget or corrupt copy), report the oldest time it actually
-    // reached, so the store never records unscanned time as covered.
-    const scanComplete = stopReason === "table-end" || stopReason === "window-done";
-    const scanAborted = stopReason === "aborted";
-    let coveredFromUnix = args.startUnix;
-    if (!scanComplete) {
-      coveredFromUnix = oldestScannedSentAt === null ? null : Math.max(args.startUnix, oldestScannedSentAt);
-      if (coveredFromUnix !== null && coveredFromUnix >= args.endUnix) {
-        coveredFromUnix = null;
-      }
-    }
+    // Honest coverage: coverage is one floor the store applies to every group,
+    // so any incomplete group forces a conservative null ("covered nothing
+    // new"). The rows we did gather are still stored; the window simply stays
+    // eligible for a later re-scan instead of being falsely marked complete. A
+    // completed run covers the whole requested window because the [40027] index
+    // walks every one of the group's messages, not a row-budget slice.
+    const scanComplete = incompleteGroups.size === 0;
+    const scanAborted = errors.length > 0;
+    const scanTruncated = !scanComplete && !scanAborted;
+    const coveredFromUnix = scanComplete ? args.startUnix : null;
+    const stopReason = scanComplete ? "complete" : scanAborted ? "aborted" : "scan-limit";
 
     if (!scanComplete) {
-      const reasonText = scanAborted ? "数据库副本读取错误过多，扫描提前中止" : "扫描行数达到上限";
-      const missText = coveredFromUnix === null ? "请求的整个时间范围都可能缺失" : `早于该时间点的消息可能缺失`;
-      console.log(`warning=scan-incomplete reason=${stopReason} coveredFromUnix=${coveredFromUnix ?? "none"}`);
-      console.log(`警告：${reasonText}，${missText}。可在 config\\defaults.json 提高 defaultScanLimit，或缩小时间范围后重试。`);
+      const reasonText = scanAborted ? "数据库副本读取错误过多，扫描提前中止" : "群消息数超过扫描上限";
+      console.log(`warning=scan-incomplete reason=${stopReason} groups=${[...incompleteGroups].join(",")}`);
+      console.log(`警告：${reasonText}。可在 config\\defaults.json 提高 defaultScanLimit，或缩小时间范围后重试。`);
     }
 
     const output = {
@@ -620,7 +608,7 @@ const exportMessages = (args, key) => {
       endUnix: args.endUnix,
       scanned,
       stopReason,
-      scanTruncated: !scanComplete && !scanAborted,
+      scanTruncated,
       scanAborted,
       coveredFromUnix,
       matched: messages.length,

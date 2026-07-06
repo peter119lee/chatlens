@@ -56,6 +56,28 @@ const localTopicLine = (analysis) =>
     .map((topic) => topic.name)
     .join(" / ");
 
+// Honest per-group coverage note. With map-reduce a busy group's digest now
+// covers the whole window, so say so instead of the old "只基于最近 N 条".
+const llmBasisNote = (llm, total) => {
+  if (!llm) {
+    return null;
+  }
+  const coverage = llm.coverage;
+  if (coverage && Number.isFinite(coverage.totalTextMessages)) {
+    const covered = Number.isFinite(coverage.includedTextMessages) ? coverage.includedTextMessages : coverage.totalTextMessages;
+    const chunks = coverage.chunks ?? 1;
+    if (coverage.mode === "single") {
+      return covered < coverage.totalTextMessages ? `AI 摘要基于最近 ${covered} 条` : null;
+    }
+    return coverage.capped === true
+      ? `AI 摘要已覆盖 ${covered}/${coverage.totalTextMessages} 条（${chunks} 段）`
+      : `AI 摘要已覆盖全部 ${coverage.totalTextMessages} 条（${chunks} 段）`;
+  }
+  return Number.isFinite(llm.provider?.messageLines) && llm.provider.messageLines < total
+    ? `AI 摘要基于最近 ${llm.provider.messageLines} 条`
+    : null;
+};
+
 const buildGroupView = (groupId, analysis, manifest) => {
   const name = analysis.groupNames?.[groupId] || groupId;
   const llm = analysis.llmSummary ?? null;
@@ -73,10 +95,7 @@ const buildGroupView = (groupId, analysis, manifest) => {
     groupId,
     name,
     label: name === groupId ? groupId : `${name}(${groupId})`,
-    llmBasisNote:
-      Number.isFinite(llm?.provider?.messageLines) && llm.provider.messageLines < (analysis.parsedTextMessages ?? 0)
-        ? `AI 摘要基于最近 ${llm.provider.messageLines} 条`
-        : null,
+    llmBasisNote: llmBasisNote(llm, analysis.parsedTextMessages ?? 0),
     textMessages: analysis.parsedTextMessages ?? 0,
     mediaMessages: analysis.parsedMediaMessages ?? 0,
     firstHkt: analysis.firstMessageHkt ?? null,

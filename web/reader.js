@@ -97,17 +97,36 @@ const uncategorizedNodes = (group) => {
         `: ${item.note}`))));
 };
 
+// Honest coverage note: map-reduce now covers the whole window, so show
+// "已覆盖全部 N 条（K 段）" instead of the old "只基于最近 N 条".
+const coverageNote = (group) => {
+  const llm = group.llmSummary;
+  if (!llm) {
+    return "";
+  }
+  const c = llm.coverage;
+  if (c && Number.isFinite(c.totalTextMessages)) {
+    const covered = Number.isFinite(c.includedTextMessages) ? c.includedTextMessages : c.totalTextMessages;
+    const chunks = c.chunks ?? 1;
+    if (c.mode === "single") {
+      return covered < c.totalTextMessages ? ` · AI 摘要基于最近 ${covered} 条` : "";
+    }
+    return c.capped === true
+      ? ` · AI 摘要已覆盖 ${covered}/${c.totalTextMessages} 条（${chunks} 段）`
+      : ` · AI 摘要已覆盖全部 ${c.totalTextMessages} 条（${chunks} 段）`;
+  }
+  return Number.isFinite(llm.provider?.messageLines) && llm.provider.messageLines < group.textMessages
+    ? ` · AI 摘要基于最近 ${llm.provider.messageLines} 条`
+    : "";
+};
+
 const groupSectionNode = (group, media) => {
   const groupMedia = media.filter((item) => item.groupId === group.groupId).slice(0, 12);
   const isVideoPath = (value) => /\.(mp4|mov|webm|mkv|avi)$/iu.test(value);
 
   return el("div", { class: "card group-section", id: `reader-group-${group.groupId}` },
     el("h2", {}, group.name,
-      el("small", {}, `${group.groupId} · 文本 ${group.textMessages} · 媒体 ${group.mediaMessages} · ${group.llmSummary !== null ? "LLM 主题" : "本地分组"}${
-        Number.isFinite(group.llmSummary?.provider?.messageLines) && group.llmSummary.provider.messageLines < group.textMessages
-          ? ` · AI 摘要基于最近 ${group.llmSummary.provider.messageLines} 条`
-          : ""
-      }`)),
+      el("small", {}, `${group.groupId} · 文本 ${group.textMessages} · 媒体 ${group.mediaMessages} · ${group.llmSummary !== null ? "LLM 主题" : "本地分组"}${coverageNote(group)}`)),
     group.llmSummary?.summary ? el("p", { class: "card-sub" }, group.llmSummary.summary) : null,
     timelineNodes(group),
     topicNodes(group),

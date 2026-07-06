@@ -117,11 +117,33 @@ const scanWarningText = (analysis) => {
 };
 
 const llmBasisText = (analysis) => {
-  const lines = analysis.llmSummary?.provider?.messageLines;
-  if (!Number.isFinite(lines) || lines >= (analysis.parsedTextMessages ?? 0)) {
+  const summary = analysis.llmSummary;
+  if (!summary) {
     return null;
   }
-  return `AI 摘要基于最近 ${lines} 条文本消息（共 ${analysis.parsedTextMessages} 条）；更早的内容见「本地动态分组」与 messages-clean.txt。`;
+  const total = analysis.parsedTextMessages ?? 0;
+  const coverage = summary.coverage;
+  if (coverage && Number.isFinite(coverage.totalTextMessages)) {
+    const covered = Number.isFinite(coverage.includedTextMessages) ? coverage.includedTextMessages : coverage.totalTextMessages;
+    const chunks = coverage.chunks ?? 1;
+    if (coverage.mode === "single") {
+      // A single window only "misses" something in the rare char-capped case.
+      return covered < coverage.totalTextMessages
+        ? `AI 摘要基于最近 ${covered} 条文本消息（共 ${coverage.totalTextMessages} 条）。`
+        : null;
+    }
+    if (coverage.capped === true) {
+      return `消息量过大：AI 摘要已覆盖 ${covered}/${coverage.totalTextMessages} 条文本消息（分 ${chunks} 段汇总）；如需全部，请缩小时间范围后重跑。`;
+    }
+    const mergeNote = coverage.mode === "mapreduce-local-merge" ? "（合并阶段用本地合并）" : "";
+    return `AI 摘要已覆盖全部 ${coverage.totalTextMessages} 条文本消息（分 ${chunks} 段汇总）${mergeNote}。`;
+  }
+  // Legacy exports without the coverage field keep the old messageLines note.
+  const lines = summary.provider?.messageLines;
+  if (!Number.isFinite(lines) || lines >= total) {
+    return null;
+  }
+  return `AI 摘要基于最近 ${lines} 条文本消息（共 ${total} 条）；更早的内容见「本地动态分组」与 messages-clean.txt。`;
 };
 
 const topItems = (items, limit) => items.slice(0, limit).map(([name, count]) => `- ${name}: ${count}`).join("\n");
