@@ -21,10 +21,13 @@
 - 可选：任意 OpenAI 兼容的 LLM API（DeepSeek / OpenAI / 本地 Ollama 等），不配置则只做本地统计不做 AI 总结。
 
 ## 安装
+Download from release,
+
+or
 
 ```powershell
 git clone https://github.com/peter119lee/chatlens
-cd chatlens
+cd qqnt-readonly-summary-toolkit
 npm install
 ```
 
