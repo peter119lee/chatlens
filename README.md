@@ -50,7 +50,7 @@ npm install
 ## 数据与隐私
 
 - 所有产物（消息库 `store\`、扫描产物 `runs\`、报告 `reports\`）都只在本机，均已被 `.gitignore` 排除。
-- 本地消息库默认 3 天自动清理；运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cleanup_generated_data.ps1` 可一键清空全部生成数据。
+- 本地消息库默认 30 天自动清理（设置页可调）；运行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\cleanup_generated_data.ps1` 可一键清空全部生成数据。
 - 控制台只监听 `127.0.0.1`，每次启动生成随机访问令牌，拒绝非本机 Host。
 
 ## 免责声明
