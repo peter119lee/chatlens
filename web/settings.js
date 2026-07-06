@@ -2,7 +2,7 @@
 
 /* ---------- settings view: QQ paths, keys, LLM config ---------- */
 
-const settingsState = { status: null, models: [], schedule: null, llmDraft: null, llmNotice: null };
+const settingsState = { status: null, models: [], schedule: null, llmDraft: null, llmNotice: null, qqCandidates: [], pathNotice: null };
 // One-click NTQQ key recovery lives across re-renders (renderSettingsView rebuilds
 // the whole view), so its busy flag and last notice are kept module-level.
 const autoKeyState = { busy: false, notice: null };
@@ -11,6 +11,8 @@ const openSettingsView = async () => {
   showView("settings");
   settingsState.llmDraft = null;
   settingsState.llmNotice = null;
+  settingsState.qqCandidates = [];
+  settingsState.pathNotice = null;
   renderSettingsView();
   try {
     settingsState.status = await api("/api/settings");
@@ -36,6 +38,17 @@ const settingsFeedback = (element, text, isError) => {
   element.style.color = isError ? "var(--risk)" : "var(--ok)";
 };
 
+// Persist the detected/typed QQ path immediately so the key auto-detect (which
+// reads the SAVED server-side config) works without a separate save click.
+const saveDetectedQqPath = async (candidate) => {
+  const result = await api("/api/settings/qq-paths", {
+    method: "POST",
+    body: JSON.stringify({ ntDbDir: candidate.ntDbDir, ntDataDir: candidate.ntDataDir }),
+  });
+  settingsState.status = await api("/api/settings");
+  return { ntDbDirExists: result.ntDbDirExists };
+};
+
 const renderSettingsView = () => {
   const status = settingsState.status;
   if (status === null) {
@@ -47,31 +60,66 @@ const renderSettingsView = () => {
   const dbInput = el("input", { type: "text", value: status.ntDbDir, placeholder: "例如 C:\\Users\\你\\Documents\\Tencent Files\\你的QQ号\\nt_qq\\nt_db", style: "width:100%" });
   const dataInput = el("input", { type: "text", value: status.ntDataDir, placeholder: "nt_data 目录（媒体导出用，可留空）", style: "width:100%" });
   const pathMsg = el("span", { style: "font-size:13px" });
+  if (settingsState.pathNotice !== null) {
+    settingsFeedback(pathMsg, settingsState.pathNotice.text, settingsState.pathNotice.isError);
+  }
+  // Multiple QQ accounts on this machine → one-click switch chips, each saving
+  // on click so there is never a separate "save" step.
+  const accountRow = settingsState.qqCandidates.length > 1
+    ? el("div", { class: "row", style: "margin-bottom:10px;flex-wrap:wrap" },
+        el("span", { class: "card-sub", style: "margin:0" }, "选择账号："),
+        settingsState.qqCandidates.map((candidate) =>
+          el("button", {
+            class: `chip ${status.ntDbDir === candidate.ntDbDir ? "on" : ""}`,
+            onclick: async () => {
+              try {
+                const saved = await saveDetectedQqPath(candidate);
+                settingsState.pathNotice = {
+                  text: saved.ntDbDirExists ? `已切换并保存 QQ ${candidate.qq}。` : `已保存 QQ ${candidate.qq}，但该目录当前不存在。`,
+                  isError: !saved.ntDbDirExists,
+                };
+              } catch (error) {
+                settingsState.pathNotice = { text: error.message, isError: true };
+              }
+              renderSettingsView();
+            },
+          }, `QQ ${candidate.qq}`)))
+    : null;
   const pathsCard = el("div", { class: "card" },
     el("h2", {}, "QQ 数据库路径"),
     el("p", { class: "card-sub" }, "QQNT 的本地数据库目录。工具只会复制这里的文件做只读分析，绝不修改原文件。"),
     el("div", { style: "display:grid;gap:8px;margin-bottom:10px" }, dbInput, dataInput),
+    accountRow,
     el("div", { class: "row" },
       el("button", {
         class: "btn small",
         onclick: async (event) => {
-          const button = event.target;
-          button.disabled = true;
+          event.target.disabled = true;
+          settingsFeedback(pathMsg, "正在探测…", false);
           try {
             const result = await api("/api/settings/detect-qq", { method: "POST" });
             if (result.candidates.length === 0) {
-              settingsFeedback(pathMsg, "没有在默认位置找到，请手动填写（QQ 设置里可查看文件保存路径）。", true);
+              settingsState.qqCandidates = [];
+              settingsState.pathNotice = { text: "没有在默认位置找到，请手动填写路径后点「保存路径」（QQ 设置里可查看文件保存位置）。", isError: true };
             } else {
-              dbInput.value = result.candidates[0].ntDbDir;
-              dataInput.value = result.candidates[0].ntDataDir;
-              settingsFeedback(pathMsg, `找到 QQ ${result.candidates[0].qq} 的数据目录，确认后点保存。`, false);
+              settingsState.qqCandidates = result.candidates;
+              // Auto-save the first hit so a single-account user is fully one-click.
+              const saved = await saveDetectedQqPath(result.candidates[0]);
+              settingsState.pathNotice = result.candidates.length > 1
+                ? { text: `找到 ${result.candidates.length} 个账号，已默认保存 QQ ${result.candidates[0].qq}；要用其它账号点上面切换即可。`, isError: false }
+                : {
+                    text: saved.ntDbDirExists
+                      ? `已找到并保存 QQ ${result.candidates[0].qq} 的数据库路径，可直接到下面获取密钥。`
+                      : `已保存 QQ ${result.candidates[0].qq}，但该 nt_db 目录当前不存在，请检查。`,
+                    isError: !saved.ntDbDirExists,
+                  };
             }
           } catch (error) {
-            settingsFeedback(pathMsg, error.message, true);
+            settingsState.pathNotice = { text: error.message, isError: true };
           }
-          button.disabled = false;
+          renderSettingsView();
         },
-      }, "🔍 自动探测"),
+      }, "🔍 自动探测并保存"),
       el("button", {
         class: "btn small primary",
         onclick: async () => {
@@ -80,10 +128,12 @@ const renderSettingsView = () => {
               method: "POST",
               body: JSON.stringify({ ntDbDir: dbInput.value, ntDataDir: dataInput.value }),
             });
-            settingsFeedback(pathMsg, result.ntDbDirExists ? "已保存。" : "已保存，但该 nt_db 目录当前不存在，请检查。", !result.ntDbDirExists);
+            settingsState.status = await api("/api/settings");
+            settingsState.pathNotice = { text: result.ntDbDirExists ? "已保存。" : "已保存，但该 nt_db 目录当前不存在，请检查。", isError: !result.ntDbDirExists };
           } catch (error) {
-            settingsFeedback(pathMsg, error.message, true);
+            settingsState.pathNotice = { text: error.message, isError: true };
           }
+          renderSettingsView();
         },
       }, "保存路径"),
       pathMsg));
