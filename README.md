@@ -24,7 +24,7 @@
 
 ```powershell
 git clone https://github.com/peter119lee/chatlens
-cd qqnt-readonly-summary-toolkit
+cd chatlens
 npm install
 ```
 
