@@ -53,7 +53,11 @@ const parseArgs = (argv) => {
   };
 };
 
-const getMessageText = (hex) => {
+// Legacy byte-scanner: matches the `82 16` tail of the plain-text element tag
+// (field 45101). It catches simple text messages but MISSES the ~18% whose text
+// is nested deeper (e.g. msg_type2=4096 rich elements at 45600.x). Kept only as
+// a fallback for bodies the strict protobuf parser below can't walk.
+const getMessageTextLegacy = (hex) => {
   if (hex === null || hex.length === 0) {
     return "";
   }
@@ -101,6 +105,143 @@ const getMessageText = (hex) => {
   }
 
   return Buffer.from(text).toString("utf8").trim();
+};
+
+// Minimal protobuf reader: the QQNT message body (40800) is a protobuf whose
+// text lives in length-delimited string fields at varying depths. Walking it
+// generically recovers text the legacy `82 16` heuristic never reached.
+const readVarint = (buf, index) => {
+  let shift = 0;
+  let result = 0;
+  let pos = index;
+  while (pos < buf.length) {
+    const byte = buf[pos];
+    pos += 1;
+    result += (byte & 0x7f) * 2 ** shift;
+    if ((byte & 0x80) === 0) {
+      return [result, pos];
+    }
+    shift += 7;
+    if (shift > 56) {
+      return [null, pos];
+    }
+  }
+  return [null, pos];
+};
+
+// Strict parse: returns null on any malformed field so a text leaf is never
+// confused with a container. Malformed-tail bodies fall back to the legacy
+// scanner in getMessageText below.
+const parseProtobufFields = (buf) => {
+  const fields = [];
+  let i = 0;
+  while (i < buf.length) {
+    const [tag, next] = readVarint(buf, i);
+    if (tag === null) {
+      return null;
+    }
+    i = next;
+    const fieldNumber = Math.floor(tag / 8);
+    const wireType = tag & 7;
+    if (fieldNumber === 0) {
+      return null;
+    }
+    if (wireType === 0) {
+      const [, afterVarint] = readVarint(buf, i);
+      if (afterVarint === null || afterVarint > buf.length) {
+        return null;
+      }
+      i = afterVarint;
+    } else if (wireType === 2) {
+      const [length, afterLength] = readVarint(buf, i);
+      if (length === null || afterLength + length > buf.length) {
+        return null;
+      }
+      fields.push({ wireType, slice: buf.subarray(afterLength, afterLength + length) });
+      i = afterLength + length;
+    } else if (wireType === 5) {
+      if (i + 4 > buf.length) {
+        return null;
+      }
+      i += 4;
+    } else if (wireType === 1) {
+      if (i + 8 > buf.length) {
+        return null;
+      }
+      i += 8;
+    } else {
+      return null;
+    }
+  }
+  return fields;
+};
+
+const isCjk = (code) =>
+  (code >= 0x3400 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0x20000 && code <= 0x2ffff);
+
+// A length-delimited slice is message text if it decodes as clean UTF-8 (no
+// replacement/control bytes — those betray a protobuf container) and carries a
+// CJK run or real word, and does not look like a hash / path / URL / token.
+const sliceLooksLikeText = (slice) => {
+  if (slice.length === 0 || slice.length > 8192) {
+    return false;
+  }
+  const text = slice.toString("utf8");
+  let cjk = 0;
+  for (const character of text) {
+    const code = character.codePointAt(0);
+    if (code === 0xfffd || code < 9 || (code > 13 && code < 32)) {
+      return false;
+    }
+    if (isCjk(code)) {
+      cjk += 1;
+    }
+  }
+  if (cjk >= 1) {
+    return true;
+  }
+  if (!/^[\x20-\x7e]+$/u.test(text) || !/[A-Za-z]{2,}/u.test(text)) {
+    return false;
+  }
+  return !(/^[0-9a-fA-F]{16,}$/u.test(text) || /[\\/]/u.test(text) || /^https?:/iu.test(text) || /^[A-Za-z0-9+/=_-]{24,}$/u.test(text));
+};
+
+const extractProtobufText = (hex) => {
+  if (hex === null || hex.length === 0) {
+    return "";
+  }
+  const parts = [];
+  const seen = new Set();
+  const walk = (buf, depth) => {
+    if (depth > 10) {
+      return;
+    }
+    const fields = parseProtobufFields(buf);
+    if (fields === null) {
+      return;
+    }
+    for (const field of fields) {
+      if (field.wireType !== 2) {
+        continue;
+      }
+      if (sliceLooksLikeText(field.slice)) {
+        const value = field.slice.toString("utf8").trim();
+        if (value.length > 0 && !seen.has(value)) {
+          seen.add(value);
+          parts.push(value);
+        }
+      } else if (field.slice.length >= 2) {
+        walk(field.slice, depth + 1);
+      }
+    }
+  };
+  walk(Buffer.from(hex, "hex"), 0);
+  return parts.join(" ").replace(/[^\S\n]+/gu, " ").trim();
+};
+
+const getMessageText = (hex) => {
+  const extracted = extractProtobufText(hex);
+  return extracted.length > 0 ? extracted : getMessageTextLegacy(hex);
 };
 
 const getBodyText = (hex) => {
@@ -414,6 +555,42 @@ const exportMessages = (args, key) => {
       }
     }
 
+    // A reply / forward / quote re-embeds the ORIGINAL message's image ref, so
+    // extractMediaRefs would attribute the quoted image to the replier and show
+    // it a second time ("回复图片被算成我发的、重复出现"). Keep each (group, hash)
+    // only on its EARLIEST message; later re-references drop that ref. Stickers/
+    // emoji and hashless refs (URLs) are exempt so genuine repeats still show.
+    const earliestOwnerByHash = new Map();
+    for (const media of mediaMessages) {
+      for (const ref of media.mediaRefs) {
+        if (ref.kind === "emoji" || ref.hash === null) {
+          continue;
+        }
+        const hashKey = `${media.groupId}|${ref.hash}`;
+        const owner = earliestOwnerByHash.get(hashKey);
+        if (
+          owner === undefined ||
+          media.sentAt < owner.sentAt ||
+          (media.sentAt === owner.sentAt && BigInt(media.rowId) < BigInt(owner.rowId))
+        ) {
+          earliestOwnerByHash.set(hashKey, { sentAt: media.sentAt, rowId: String(media.rowId) });
+        }
+      }
+    }
+    const dedupedMediaMessages = [];
+    for (const media of mediaMessages) {
+      const keptRefs = media.mediaRefs.filter((ref) => {
+        if (ref.kind === "emoji" || ref.hash === null) {
+          return true;
+        }
+        const owner = earliestOwnerByHash.get(`${media.groupId}|${ref.hash}`);
+        return owner !== undefined && owner.sentAt === media.sentAt && owner.rowId === String(media.rowId);
+      });
+      if (keptRefs.length > 0) {
+        dedupedMediaMessages.push({ ...media, mediaRefs: keptRefs });
+      }
+    }
+
     const sortByTimeAndRow = (left, right) => left.sentAt - right.sentAt || Number(BigInt(left.rowId) - BigInt(right.rowId));
 
     // Honest coverage: when the scan stopped before walking the whole window
@@ -447,10 +624,10 @@ const exportMessages = (args, key) => {
       scanAborted,
       coveredFromUnix,
       matched: messages.length,
-      matchedMedia: mediaMessages.length,
+      matchedMedia: dedupedMediaMessages.length,
       errors,
       messages: messages.sort(sortByTimeAndRow),
-      mediaMessages: mediaMessages.sort(sortByTimeAndRow),
+      mediaMessages: dedupedMediaMessages.sort(sortByTimeAndRow),
     };
 
     fs.writeFileSync(args.outputPath, JSON.stringify(output, null, 2), "utf8");
