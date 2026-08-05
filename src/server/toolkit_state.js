@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { readJson } = require("../report_utils");
-const { collectRuns, pathExists, dirSize, parseRunTimestamp } = require("../run_index");
+const { collectRun, collectRuns, pathExists, dirSize, parseRunTimestamp } = require("../run_index");
 const messageStore = require("../message_store");
 
 const toolRoot = path.resolve(__dirname, "..", "..");
@@ -44,6 +44,15 @@ const normalizeWatchlist = (config) =>
         : { groupId: String(item?.groupId ?? "").trim(), name: String(item?.name ?? "") },
     )
     .filter((entry) => /^\d+$/u.test(entry.groupId));
+
+const normalizeGroupSets = (sets) => (sets ?? [])
+  .map((set) => ({
+    name: String(set?.name ?? "").trim().slice(0, 40),
+    groupIds: [...new Set((set?.groupIds ?? []).map(String).map((value) => value.trim()))]
+      .filter((groupId) => /^\d+$/u.test(groupId)),
+  }))
+  .filter((set) => set.name.length > 0 && set.groupIds.length > 0 && set.groupIds.length <= 50)
+  .slice(0, 20);
 
 // Persist against the raw on-disk shape (loadConfig absolutizes runsDir/reportsDir
 // in memory — writing that back would bake machine paths into the config), and
@@ -105,10 +114,92 @@ const updateWatchlist = ({ add = [], remove = [] }) => {
   return entries;
 };
 
+const updateGroupSets = ({ save, remove }) => {
+  const config = loadRawConfig();
+  const current = normalizeGroupSets(config.groupSets);
+  const removeName = typeof remove === "string" ? remove.trim() : "";
+  let next = removeName.length > 0 ? current.filter((set) => set.name !== removeName) : current;
+  if (save !== null && save !== undefined) {
+    const normalized = normalizeGroupSets([save]);
+    if (normalized.length !== 1) {
+      throw new Error("常用群组合需要名称，并包含 1-50 个有效群号。");
+    }
+    const set = normalized[0];
+    next = [...next.filter((entry) => entry.name !== set.name), set];
+  }
+  config.groupSets = next;
+  writeConfig(config);
+  return next;
+};
+
+const currentCoverageWindow = (days, toUnix) => {
+  const daySeconds = 24 * 60 * 60;
+  const beijingOffsetSeconds = 8 * 60 * 60;
+  const currentDayStart = Math.floor((toUnix + beijingOffsetSeconds) / daySeconds) * daySeconds
+    - beijingOffsetSeconds;
+  return { fromUnix: currentDayStart - (days - 1) * daySeconds, toUnix };
+};
+
+const historicalCoverageWindow = (days, toUnix) => ({
+  fromUnix: toUnix - days * TIMELINE_DAY_SECONDS,
+  toUnix,
+});
+
+const getWatchlistHealth = (watchlist, nowUnix) => {
+  const db = getStore();
+  const { fromUnix, toUnix } = currentCoverageWindow(7, nowUnix);
+  const summaries = new Map(messageStore.getGroupSummaries(db).map((group) => [group.groupId, group]));
+  const coverageEnds = messageStore.getCoverageEnds(db);
+  return watchlist.map((entry) => {
+    const health = messageStore.getCoverageHealth(db, [entry.groupId], fromUnix, toUnix);
+    const summary = summaries.get(entry.groupId);
+    return {
+      groupId: entry.groupId,
+      name: entry.name,
+      coverageRatio: health.coverageRatio,
+      missingSeconds: health.missingSeconds,
+      earliestGapUnix: health.earliestGapUnix,
+      latestScanUnix: coverageEnds[entry.groupId] ?? null,
+      latestMessageUnix: summary?.lastUnix ?? null,
+      localUnviewedCount: summary?.unreadCount ?? 0,
+    };
+  });
+};
+
+const getGroupActivity = () => {
+  const db = getStore();
+  const summaries = new Map(messageStore.getGroupSummaries(db).map((group) => [group.groupId, group]));
+  return Object.entries(messageStore.getCoverageEnds(db))
+    .map(([groupId, latestScanUnix]) => ({
+      groupId,
+      latestScanUnix,
+      latestMessageUnix: summaries.get(groupId)?.lastUnix ?? null,
+    }))
+    .sort((left, right) => right.latestScanUnix - left.latestScanUnix);
+};
+
+const getAutomationCoverage = () => {
+  const config = loadConfig();
+  const watchlist = normalizeWatchlist(config);
+  const coverageEnds = messageStore.getCoverageEnds(getStore());
+  const covered = watchlist
+    .map((entry) => coverageEnds[entry.groupId])
+    .filter((value) => Number.isFinite(value));
+  return {
+    targetGroupCount: watchlist.length,
+    unscannedGroupCount: watchlist.length - covered.length,
+    coverageThroughUnix: covered.length === watchlist.length && covered.length > 0 ? Math.min(...covered) : null,
+  };
+};
+
 const getState = () => {
   const config = loadConfig();
+  const watchlist = normalizeWatchlist(config);
   return {
-    watchlist: normalizeWatchlist(config),
+    watchlist,
+    groupSets: normalizeGroupSets(config.groupSets),
+    watchHealth: getWatchlistHealth(watchlist, Math.floor(Date.now() / 1000)),
+    groupActivity: getGroupActivity(),
     runDefaults: config.runDefaults ?? {},
     knownGroups: getKnownGroups(config),
     runs: collectRuns(config.runsDir, config.reportsDir).map((run) => ({
@@ -199,6 +290,10 @@ const getRunDetail = (runId) => {
     : [];
 
   const reportHtml = path.join(config.reportsDir, `${runId}.html`);
+  const runMeta = collectRun(runDir, config.reportsDir);
+  if (runMeta === null) {
+    throw new Error(`Run metadata is unreadable: ${runId}`);
+  }
   return {
     runId,
     runDir,
@@ -210,6 +305,8 @@ const getRunDetail = (runId) => {
     digest,
     groups,
     media,
+    scanCoverage: runMeta.scanCoverage,
+    aiCoverage: runMeta.aiCoverage,
   };
 };
 
@@ -252,15 +349,66 @@ const getStoreOverview = () => {
       readMark: messageStore.getReadMark(db, group.groupId),
     })),
     // Straight from scan_ranges: also covers groups whose stored messages
-    // were fully pruned, so "自上次记录" never skips their gap silently.
+    // have no text rows, so "自上次记录" never skips their gap silently.
     coverageEnds: messageStore.getCoverageEnds(db),
-    retentionDays: (() => {
-      const config = loadConfig();
-      const days = Number(config.store?.retentionDays);
-      return Number.isFinite(days) && days > 0 ? days : 3;
-    })(),
+    retentionPolicy: "unlimited",
   };
 };
+
+const TIMELINE_DAY_SECONDS = 24 * 60 * 60;
+
+const getStoreTimeline = (query) => {
+  const groupIds = [...new Set(String(query.groupIds ?? "").split(",").map((value) => value.trim()).filter(Boolean))];
+  if (groupIds.length === 0 || groupIds.some((groupId) => !/^\d+$/u.test(groupId))) {
+    throw new Error("groupIds must contain at least one numeric group id");
+  }
+  if (groupIds.length > 50) {
+    throw new Error("groupIds cannot contain more than 50 groups");
+  }
+
+  const days = Number.parseInt(query.days, 10);
+  if (![1, 7, 30].includes(days)) {
+    throw new Error("days must be 1, 7 or 30");
+  }
+
+  const nowUnix = Math.floor(Date.now() / 1000);
+  const requestedToUnix = query.toUnix === undefined ? null : String(query.toUnix);
+  if (requestedToUnix !== null && (!/^\d+$/u.test(requestedToUnix) || Number(requestedToUnix) > nowUnix)) {
+    throw new Error(`toUnix must be a Unix timestamp no later than ${nowUnix}`);
+  }
+  const toUnix = requestedToUnix === null ? nowUnix : Number(requestedToUnix);
+  const { fromUnix } = requestedToUnix === null
+    ? currentCoverageWindow(days, toUnix)
+    : historicalCoverageWindow(days, toUnix);
+  const slotSeconds = days === 1 ? 60 * 60 : days === 7 ? 6 * 60 * 60 : TIMELINE_DAY_SECONDS;
+  return {
+    fromUnix,
+    toUnix,
+    slotSeconds,
+    groups: messageStore.getCoverageTimeline(getStore(), groupIds, fromUnix, toUnix, slotSeconds),
+    health: messageStore.getCoverageHealth(getStore(), groupIds, fromUnix, toUnix),
+  };
+};
+
+const getGalleryRange = (query) => {
+  const groupIds = [...new Set(String(query.groupIds ?? "").split(",").map((value) => value.trim()).filter(Boolean))];
+  if (groupIds.length === 0 || groupIds.some((groupId) => !/^\d+$/u.test(groupId))) {
+    throw new Error("groupIds must contain at least one numeric group id");
+  }
+  if (groupIds.length > 50) {
+    throw new Error("groupIds cannot contain more than 50 groups");
+  }
+  const fromUnix = Number.parseInt(query.fromUnix, 10);
+  const toUnix = Number.parseInt(query.toUnix, 10);
+  if (!Number.isFinite(fromUnix) || !Number.isFinite(toUnix) || fromUnix <= 0 || fromUnix >= toUnix) {
+    throw new Error(`Invalid gallery range: ${query.fromUnix}-${query.toUnix}`);
+  }
+  return { fromUnix, toUnix, activity: messageStore.getRangeActivity(getStore(), groupIds, fromUnix, toUnix) };
+};
+
+const getGalleryEventActivity = (body) => ({
+  activity: messageStore.getEventActivity(getStore(), body.events),
+});
 
 // Matches the queryMessages server-side clamp; larger selections keep the oldest 500.
 const QUICK_SUMMARY_MAX_MESSAGES = 500;
@@ -339,19 +487,29 @@ const resolveRunsWebPath = (webPath) => {
   return resolved;
 };
 
-const MEDIA_EXPORT_MAX_ITEMS = 200;
-
 // Copies the run-folder media files byte-for-byte (these are already 1:1 copies of
 // the QQNT cache originals — no re-encoding happens anywhere in the pipeline).
-const exportMediaSelection = (webPaths) => {
-  if (!Array.isArray(webPaths) || webPaths.length === 0) {
-    throw new Error("没有选中任何媒体文件。");
-  }
-  if (webPaths.length > MEDIA_EXPORT_MAX_ITEMS) {
-    throw new Error(`一次最多导出 ${MEDIA_EXPORT_MAX_ITEMS} 个文件。`);
-  }
-
+// Destination for a knowledge-base export. Deliberately derived, never taken
+// from the request: the caller only picks a label, so no input can escape
+// reportsDir. Mirrors exportMediaSelection's naming so both land side by side.
+const resolveKnowledgeExportDir = (label) => {
   const config = loadConfig();
+  const now = new Date();
+  const pad = (value) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  const safeLabel = String(label ?? "")
+    .replace(/[^\p{L}\p{N}_-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 40);
+  const base = safeLabel.length > 0 ? `prompt-export-${safeLabel}-${stamp}` : `prompt-export-${stamp}`;
+  let exportDir = path.join(config.reportsDir, base);
+  for (let suffix = 2; fs.existsSync(exportDir); suffix += 1) {
+    exportDir = path.join(config.reportsDir, `${base}-${suffix}`);
+  }
+  return exportDir;
+};
+
+const createMediaExportDir = (config) => {
   const now = new Date();
   const pad = (value) => String(value).padStart(2, "0");
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
@@ -360,19 +518,52 @@ const exportMediaSelection = (webPaths) => {
     exportDir = path.join(config.reportsDir, `media-export-${stamp}-${suffix}`);
   }
   fs.mkdirSync(exportDir, { recursive: true });
+  return exportDir;
+};
+
+const resolveMediaExportDir = (config, existingFolder) => {
+  if (existingFolder === null || existingFolder === undefined || existingFolder === "") {
+    return createMediaExportDir(config);
+  }
+  if (typeof existingFolder !== "string") {
+    throw new TypeError("Media export folder must be a path returned by the toolkit.");
+  }
+  const resolved = path.resolve(existingFolder);
+  const relative = path.relative(path.resolve(config.reportsDir), resolved);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative) || !path.basename(resolved).startsWith("media-export-")) {
+    throw new Error("Media export folder is outside the reports directory.");
+  }
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error(`Media export folder does not exist: ${resolved}`);
+  }
+  return resolved;
+};
+
+const exportMediaSelection = (webPaths, existingFolder) => {
+  if (!Array.isArray(webPaths) || webPaths.length === 0) {
+    throw new Error("没有选中任何媒体文件。");
+  }
+
+  const config = loadConfig();
+  const exportDir = resolveMediaExportDir(config, existingFolder);
 
   let copied = 0;
   const failed = [];
-  const usedNames = new Set();
+  const usedNames = new Set(fs.readdirSync(exportDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name.toLowerCase()));
   for (const webPath of webPaths) {
     const sourcePath = resolveRunsWebPath(webPath);
     if (sourcePath === null || !fs.existsSync(sourcePath)) {
       failed.push(String(webPath));
       continue;
     }
-    let targetName = path.basename(sourcePath);
-    if (usedNames.has(targetName.toLowerCase())) {
-      targetName = `${copied + 1}_${targetName}`;
+    const baseName = path.basename(sourcePath);
+    let targetName = baseName;
+    let collision = 1;
+    while (usedNames.has(targetName.toLowerCase())) {
+      targetName = `${collision}_${baseName}`;
+      collision += 1;
     }
     usedNames.add(targetName.toLowerCase());
     try {
@@ -383,10 +574,6 @@ const exportMediaSelection = (webPaths) => {
     }
   }
 
-  if (copied === 0) {
-    fs.rmSync(exportDir, { recursive: true, force: true });
-    throw new Error("所有文件都复制失败（可能已被清理）。");
-  }
   return { folder: exportDir, copied, failed };
 };
 
@@ -415,12 +602,28 @@ const saveReadMark = ({ groupId, sentAt, rowId, toLatest }) => {
 };
 
 const MEDIA_INDEX_TTL_MS = 30 * 1000;
-// MAX_ITEMS counts unique files (primaries); duplicate occurrences ride along
-// up to the total cap so the chat join still sees every occurrence without
-// dups evicting older unique media from the budget.
-const MEDIA_INDEX_MAX_ITEMS = 4000;
-const MEDIA_INDEX_TOTAL_CAP = 12000;
 let mediaIndexCache = null;
+let mediaManifestCache = new Map();
+
+const finalizeMediaIndex = (allItems, scannedRefs) => {
+  const primaryByKey = new Map();
+  for (const item of allItems) {
+    const primary = primaryByKey.get(item.dedupKey);
+    if (primary === undefined || item.hkt > primary.hkt) {
+      primaryByKey.set(item.dedupKey, item);
+    }
+  }
+
+  const items = allItems
+    .map((item) => ({ ...item, dup: primaryByKey.get(item.dedupKey) !== item }))
+    .sort((left, right) => right.hkt.localeCompare(left.hkt));
+  return {
+    totalItems: primaryByKey.size,
+    truncated: false,
+    scannedRefs,
+    items,
+  };
+};
 
 const buildMediaIndex = (forceRefresh) => {
   if (forceRefresh !== true && mediaIndexCache !== null && Date.now() - mediaIndexCache.builtAt < MEDIA_INDEX_TTL_MS) {
@@ -430,6 +633,7 @@ const buildMediaIndex = (forceRefresh) => {
   const config = loadConfig();
   const allItems = [];
   let scannedRefs = 0;
+  const seenManifestPaths = new Set();
 
   if (pathExists(config.runsDir)) {
     for (const entry of fs.readdirSync(config.runsDir, { withFileTypes: true })) {
@@ -441,13 +645,27 @@ const buildMediaIndex = (forceRefresh) => {
         continue;
       }
 
-      let manifest;
+      seenManifestPaths.add(manifestPath);
+      let manifestStat;
       try {
-        manifest = readJson(manifestPath);
+        manifestStat = fs.statSync(manifestPath);
       } catch (error) {
-        // A truncated manifest from a killed run must not break the whole index.
-        console.error(`media-index: 跳过无法解析的 manifest（${entry.name}）: ${error.message}`);
+        console.error(`media-index: 跳过无法读取的 manifest（${entry.name}）: ${error.message}`);
         continue;
+      }
+      const cachedManifest = mediaManifestCache.get(manifestPath);
+      let manifest;
+      if (cachedManifest?.mtimeMs === manifestStat.mtimeMs && cachedManifest.size === manifestStat.size) {
+        manifest = cachedManifest.items;
+      } else {
+        try {
+          manifest = readJson(manifestPath);
+        } catch (error) {
+          // A truncated manifest from a killed run must not break the whole index.
+          console.error(`media-index: 跳过无法解析的 manifest（${entry.name}）: ${error.message}`);
+          continue;
+        }
+        mediaManifestCache.set(manifestPath, { mtimeMs: manifestStat.mtimeMs, size: manifestStat.size, items: manifest });
       }
 
       for (const item of manifest) {
@@ -467,6 +685,8 @@ const buildMediaIndex = (forceRefresh) => {
           continue;
         }
 
+        const contentKeySource = typeof item.hash === "string" && item.hash.length > 0 ? "hash" : "filename";
+        const contentKey = contentKeySource === "hash" ? item.hash : path.basename(item.copiedPath).toLowerCase();
         allItems.push({
           runId: entry.name,
           groupId: String(item.groupId ?? ""),
@@ -477,48 +697,21 @@ const buildMediaIndex = (forceRefresh) => {
           kind: item.kind ?? "file",
           bytes,
           webPath,
+          contentKey,
+          contentKeySource,
           // Group-scoped key: the same file posted in two groups must stay
           // visible under BOTH groups' filters in the media tab.
-          dedupKey: `${String(item.groupId ?? "")}|${item.hash ?? path.basename(item.copiedPath).toLowerCase()}`,
+          dedupKey: `${String(item.groupId ?? "")}|${contentKey}`,
         });
       }
     }
   }
 
+  mediaManifestCache = new Map([...mediaManifestCache.entries()].filter(([manifestPath]) => seenManifestPaths.has(manifestPath)));
+
   // Duplicates stay in the index (the chat view joins by timestamp and needs every
   // occurrence); the media tab hides dup=true so each file shows once.
-  const primaryByKey = new Map();
-  for (const item of allItems) {
-    const primary = primaryByKey.get(item.dedupKey);
-    if (primary === undefined || item.hkt > primary.hkt) {
-      primaryByKey.set(item.dedupKey, item);
-    }
-  }
-  for (const item of allItems) {
-    item.dup = primaryByKey.get(item.dedupKey) !== item;
-  }
-
-  const sorted = allItems.sort((left, right) => right.hkt.localeCompare(left.hkt));
-  const items = [];
-  let primaries = 0;
-  for (const item of sorted) {
-    if (items.length >= MEDIA_INDEX_TOTAL_CAP) {
-      break;
-    }
-    if (!item.dup) {
-      if (primaries >= MEDIA_INDEX_MAX_ITEMS) {
-        break;
-      }
-      primaries += 1;
-    }
-    items.push(item);
-  }
-  const payload = {
-    totalItems: primaryByKey.size,
-    truncated: items.length < sorted.length,
-    scannedRefs,
-    items,
-  };
+  const payload = finalizeMediaIndex(allItems, scannedRefs);
   mediaIndexCache = { builtAt: Date.now(), payload };
   return payload;
 };
@@ -597,12 +790,22 @@ module.exports = {
   cleanupGeneratedData,
   getState,
   updateWatchlist,
+  updateGroupSets,
+  getAutomationCoverage,
+  currentCoverageWindow,
+  historicalCoverageWindow,
+  normalizeGroupSets,
   getRunDetail,
   isPathAllowedToOpen,
   getStoreMessages,
   getStoreOverview,
+  getStoreTimeline,
+  getGalleryRange,
+  getGalleryEventActivity,
   saveReadMark,
   buildMediaIndex,
+  finalizeMediaIndex,
   prepareQuickSummary,
   exportMediaSelection,
+  resolveKnowledgeExportDir,
 };

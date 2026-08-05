@@ -2,7 +2,7 @@
 
 /* ---------- settings view: QQ paths, keys, LLM config ---------- */
 
-const settingsState = { status: null, models: [], schedule: null, llmDraft: null, llmNotice: null, qqCandidates: [], pathNotice: null };
+const settingsState = { status: null, models: [], schedule: null, scheduleError: null, llmDraft: null, llmNotice: null, qqCandidates: [], pathNotice: null };
 // One-click NTQQ key recovery lives across re-renders (renderSettingsView rebuilds
 // the whole view), so its busy flag and last notice are kept module-level.
 const autoKeyState = { busy: false, notice: null };
@@ -24,8 +24,10 @@ const openSettingsView = async () => {
   renderSettingsView();
   try {
     settingsState.schedule = await api("/api/schedule");
-  } catch {
-    settingsState.schedule = { enabled: false };
+    settingsState.scheduleError = null;
+  } catch (error) {
+    settingsState.schedule = null;
+    settingsState.scheduleError = error.message;
   }
   renderSettingsView();
 };
@@ -55,6 +57,18 @@ const renderSettingsView = () => {
     setChildren($("#view-settings"), el("div", { class: "card" }, el("div", { class: "empty" }, "正在读取设置…")));
     return;
   }
+
+  const schedule = settingsState.schedule;
+  const readiness = [
+    { label: "QQ 数据库", ok: status.ntDbDirExists, detail: status.ntDbDirExists ? "路径可用" : "路径不可用" },
+    { label: "解密密钥", ok: status.ntqqKeySaved, detail: status.ntqqKeySaved ? "已保存" : "未保存" },
+    { label: "AI 总结", ok: status.llmKeySaved && status.llm.model.length > 0, detail: status.llmKeySaved && status.llm.model.length > 0 ? status.llm.model : "未配置完整" },
+    { label: "定时任务", ok: schedule?.enabled === true && schedule?.result?.status !== "failed", detail: settingsState.scheduleError !== null ? `读取失败：${settingsState.scheduleError}` : schedule === null ? "读取中" : schedule.enabled ? schedule.result?.text ?? "已开启" : "未开启" },
+  ];
+  const readinessCard = el("div", { class: "system-readiness", "data-testid": "system-readiness" },
+    readiness.map((item) => el("div", { class: `readiness-item ${item.ok ? "ok" : "attention"}` },
+      el("span", {}, item.label),
+      el("strong", {}, item.detail))));
 
   /* --- QQ database paths --- */
   const dbInput = el("input", { type: "text", value: status.ntDbDir, placeholder: "例如 C:\\Users\\你\\Documents\\Tencent Files\\你的QQ号\\nt_qq\\nt_db", style: "width:100%" });
@@ -306,9 +320,6 @@ const renderSettingsView = () => {
   /* --- scheduled digest --- */
   const scheduleCard = renderScheduleCard();
 
-  /* --- disk cleanup --- */
-  const cleanupCard = renderCleanupCard();
-
   /* --- check & update --- */
   const updateCard = renderUpdateCard();
 
@@ -319,7 +330,7 @@ const renderSettingsView = () => {
       el("li", {}, "本地：控制台只监听 127.0.0.1，带每次启动随机生成的访问令牌。"),
       el("li", {}, "外部流量仅两处：头像走 QQ 公开 CDN；开启 AI 总结时消息文本会发送到你配置的 LLM 服务。")));
 
-  setChildren($("#view-settings"), pathsCard, keysCard, llmCard, scheduleCard, cleanupCard, updateCard, aboutCard);
+  setChildren($("#view-settings"), readinessCard, pathsCard, keysCard, llmCard, scheduleCard, updateCard, aboutCard);
 };
 
 /* --- check & update card --- */
@@ -398,86 +409,6 @@ const renderUpdateCard = () => {
     notesBlock);
 };
 
-// Move the old 清理生成数据.cmd here so freeing disk space stays a one-click
-// action inside the console instead of a separate launcher.
-const renderCleanupCard = () => {
-  const msg = el("span", { style: "font-size:13px" });
-  const daysInput = el("input", { type: "number", value: "7", min: "1", max: "365", style: "width:70px" });
-  const retentionMsg = el("span", { style: "font-size:13px" });
-  const retentionInput = el("input", {
-    type: "number",
-    value: String(settingsState.status?.store?.retentionDays ?? 30),
-    min: "1",
-    max: "365",
-    style: "width:70px",
-  });
-
-  const runCleanup = async (button, payload, describe) => {
-    button.disabled = true;
-    settingsFeedback(msg, "正在清理…", false);
-    try {
-      const result = await api("/api/cleanup", { method: "POST", body: JSON.stringify(payload) });
-      settingsFeedback(msg, `${describe}：释放 ${formatBytes(result.freedBytes)}（临时库 ${result.removedCleanDbCount} 个，删除运行 ${result.removedRunCount} 个）。`, false);
-    } catch (error) {
-      settingsFeedback(msg, error.message, true);
-    }
-    button.disabled = false;
-  };
-
-  return el("div", { class: "card" },
-    el("h2", {}, "磁盘清理与消息保留"),
-    el("p", { class: "card-sub" },
-      "生成的扫描数据都在本机 runs\\ 目录。「临时数据库副本」是每次扫描解密出的 clean-db，删掉不影响报告；" +
-      "「旧运行」会连同该次的媒体副本一起删除 —— 历史报告的图片预览、聊天里的内嵌图片和媒体页都将无法再显示这些文件。"),
-    el("div", { class: "row" },
-      el("button", {
-        class: "btn small primary",
-        onclick: (event) => runCleanup(event.target, {}, "已清理临时数据库副本"),
-      }, "清理临时数据库副本"),
-      el("span", { style: "width:16px" }),
-      el("span", { style: "font-size:13px" }, "删除"),
-      daysInput,
-      el("span", { style: "font-size:13px" }, "天前的旧运行"),
-      el("button", {
-        class: "btn small",
-        onclick: (event) => {
-          const days = Number.parseInt(daysInput.value, 10);
-          if (!Number.isInteger(days) || days < 1) {
-            settingsFeedback(msg, "请输入有效的天数。", true);
-            return;
-          }
-          if (!window.confirm(`确定删除 ${days} 天前的旧运行？\n历史报告预览、聊天内嵌图片和媒体页将无法再显示这些文件。`)) {
-            return;
-          }
-          runCleanup(event.target, { olderThanDays: days }, `已删除 ${days} 天前的旧运行`);
-        },
-      }, "执行"),
-      msg),
-    el("div", { class: "row", style: "margin-top:10px" },
-      el("span", { style: "font-size:13px" }, "「消息」页保留最近"),
-      retentionInput,
-      el("span", { style: "font-size:13px" }, "天的本地消息"),
-      el("button", {
-        class: "btn small",
-        onclick: async (event) => {
-          const button = event.target;
-          button.disabled = true;
-          try {
-            const result = await api("/api/settings/store", {
-              method: "POST",
-              body: JSON.stringify({ retentionDays: retentionInput.value }),
-            });
-            settingsFeedback(retentionMsg, `已保存：保留 ${result.retentionDays} 天（下次扫描后生效）。`, false);
-            settingsState.status = await api("/api/settings");
-          } catch (error) {
-            settingsFeedback(retentionMsg, error.message, true);
-          }
-          button.disabled = false;
-        },
-      }, "保存"),
-      retentionMsg));
-};
-
 const renderScheduleCard = () => {
   const schedule = settingsState.schedule;
   const msg = el("span", { style: "font-size:13px" });
@@ -495,9 +426,17 @@ const renderScheduleCard = () => {
   const statusLine = schedule === null
     ? el("span", { class: "card-sub" }, "正在读取…")
     : schedule.enabled
-      ? el("span", {}, savedTag(true), el("span", { style: "margin-left:8px;font-size:13px" },
-          `每天 ${schedule.time} 自动总结关注群${schedule.lastRun ? `（上次运行 ${schedule.lastRun}）` : ""}`))
-      : savedTag(false);
+      ? el("div", { class: "schedule-status" },
+          el("div", {}, savedTag(true), el("span", { class: `schedule-result ${schedule.result?.status ?? "never-run"}` }, schedule.result?.text ?? "状态未知")),
+          el("div", { class: "schedule-facts" },
+            el("span", {}, `每天 ${schedule.time}`),
+            el("span", {}, `下次 ${schedule.nextRun || "等待系统计算"}`),
+            el("span", {}, `上次 ${schedule.lastRun || "尚无"}`),
+            el("span", {}, schedule.coverageThroughUnix === null
+              ? `${schedule.unscannedGroupCount}/${schedule.targetGroupCount} 群尚无共同覆盖点`
+              : `关注群共同覆盖至 ${unixToHkt(schedule.coverageThroughUnix).slice(0, 16)}`),
+            schedule.missedRuns > 0 ? el("span", { class: "risk-text" }, `系统记录 ${schedule.missedRuns} 次漏跑`) : null))
+      : el("span", { class: "tag plain" }, "未开启");
 
   return el("div", { class: "card" },
     el("h2", {}, "定时总结"),
@@ -505,6 +444,9 @@ const renderScheduleCard = () => {
       "用 Windows 计划任务每天定点自动总结「关注群」。它独立运行，不需要控制台开着；" +
       "如果到点时电脑关机或睡眠，开机后会自动补跑这次（不会静默跳过）。" +
       "每次都从上次记录点继续扫描，停机多久都不会漏消息。"),
+    settingsState.scheduleError !== null
+      ? el("div", { class: "notice risk" }, `无法读取 Windows 计划任务状态：${settingsState.scheduleError}`)
+      : null,
     el("div", { class: "row", style: "margin-bottom:10px" }, statusLine),
     el("div", { class: "row" },
       el("span", { style: "font-size:13px" }, "每天"),

@@ -1,6 +1,6 @@
 {
   "name": "qqnt-readonly-summary-toolkit",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Read-only QQNT message export helpers for local summarization.",
   "private": true,
   "type": "commonjs",
@@ -17,7 +17,8 @@
     "report-center": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/open_report_center.ps1",
     "cleanup-generated": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/cleanup_generated_data.ps1",
     "one-click": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/interactive_summary.ps1",
-    "control-center": "node src/server/control_center.js"
+    "control-center": "node src/server/control_center.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "better-sqlite3-multiple-ciphers": "^12.11.1"

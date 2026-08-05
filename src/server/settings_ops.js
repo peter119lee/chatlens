@@ -11,6 +11,7 @@ const SECRET_FILES = {
   ntqqKey: "ntqq-db-key.dpapi",
   llmKey: "deepseek-api-key.dpapi",
 };
+const getSecretDirectory = () => path.resolve(SECRET_DIR);
 const BASE_URL_PATTERN = /^https?:\/\/[\w.-]+(?::\d+)?(?:\/[\w./-]*)?$/u;
 const MODEL_NAME_PATTERN = /^[\w.:/-]{1,64}$/u;
 // Absolute Windows directory without quote-breaking or illegal path characters —
@@ -88,31 +89,19 @@ const runNodeScript = (scriptPath, args, timeoutMs) =>
 
 const getSettingsStatus = () => {
   const config = state.loadConfig();
-  const retentionDays = Number(config.store?.retentionDays);
   return {
     version: packageInfo.version,
     ntqqKeySaved: fs.existsSync(path.join(SECRET_DIR, SECRET_FILES.ntqqKey)),
     llmKeySaved: fs.existsSync(path.join(SECRET_DIR, SECRET_FILES.llmKey)),
     ntDbDir: config.ntDbDir ?? "",
     ntDataDir: config.ntDataDir ?? "",
-    store: {
-      retentionDays: Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : 30,
-    },
+    ntDbDirExists: typeof config.ntDbDir === "string" && fs.existsSync(config.ntDbDir),
+    ntDataDirExists: typeof config.ntDataDir === "string" && config.ntDataDir.length > 0 && fs.existsSync(config.ntDataDir),
     llm: {
       baseUrl: config.llm?.baseUrl ?? "",
       model: config.llm?.model ?? "",
     },
   };
-};
-
-const saveStoreConfig = ({ retentionDays }) => {
-  const days = Number.parseInt(retentionDays, 10);
-  if (!Number.isInteger(days) || days < 1 || days > 365) {
-    throw new Error("保留天数应为 1-365 的整数。");
-  }
-  const config = state.loadRawConfig();
-  saveConfigPatch({ store: { ...(config.store ?? {}), retentionDays: days } });
-  return { retentionDays: days };
 };
 
 // The secret travels via stdin only — never on a command line, never in a log.
@@ -346,8 +335,8 @@ const autoDetectKey = async () => {
 };
 
 module.exports = {
+  getSecretDirectory,
   getSettingsStatus,
-  saveStoreConfig,
   saveSecret,
   autoDetectKey,
   fetchLlmModels,

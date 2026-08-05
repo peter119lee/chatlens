@@ -10,16 +10,21 @@ const stampsRange = (stamps, padSeconds = 600) => {
   return { from: Math.min(...valid) - padSeconds, to: Math.max(...valid) + padSeconds };
 };
 
-const jumpToMessagesButton = (groupId, range, label = "查看该时段完整消息") =>
+const jumpToMessagesButton = (groupId, range, runId, label = "查看该时段完整消息") =>
   range !== null
     ? el("button", {
         class: "btn small",
         style: "margin-top:8px",
-        onclick: () => openMessagesView({ groupId, fromUnix: range.from, toUnix: range.to }),
+        onclick: () => openMessagesView({
+          groupId,
+          fromUnix: range.from,
+          toUnix: range.to,
+          origin: { view: "reader", label: "返回报告", runId },
+        }),
       }, label)
     : null;
 
-const topicNodes = (group) => {
+const topicNodes = (group, runId) => {
   if (group.llmSummary !== null) {
     const topics = group.llmSummary.topics ?? [];
     if (topics.length === 0) {
@@ -37,7 +42,7 @@ const topicNodes = (group) => {
           (topic.details ?? []).length > 0 ? el("ul", {}, topic.details.map((item) => el("li", {}, item))) : null,
           (topic.evidence ?? []).length > 0 ? el("h4", {}, "证据") : null,
           (topic.evidence ?? []).length > 0 ? el("ul", { class: "evidence" }, topic.evidence.map((item) => el("li", {}, item))) : null,
-          jumpToMessagesButton(group.groupId, range)));
+          jumpToMessagesButton(group.groupId, range, runId)));
       details.open = true;
       return details;
     });
@@ -58,10 +63,10 @@ const topicNodes = (group) => {
             el("span", { style: "color:var(--muted)" }, `[${message.hkt}] `),
             el("b", {}, message.speaker),
             `: ${message.text}`))),
-        jumpToMessagesButton(group.groupId, stampsRange((topic.sampleMessages ?? []).map((message) => hktToUnix(message.hkt)))))));
+        jumpToMessagesButton(group.groupId, stampsRange((topic.sampleMessages ?? []).map((message) => hktToUnix(message.hkt))), runId))));
 };
 
-const timelineNodes = (group) => {
+const timelineNodes = (group, runId) => {
   const items = group.llmSummary?.timeline ?? [];
   if (items.length === 0) {
     return null;
@@ -77,7 +82,12 @@ const timelineNodes = (group) => {
         range !== null
           ? el("button", {
               class: "btn small",
-              onclick: () => openMessagesView({ groupId: group.groupId, fromUnix: range.from, toUnix: range.to }),
+              onclick: () => openMessagesView({
+                groupId: group.groupId,
+                fromUnix: range.from,
+                toUnix: range.to,
+                origin: { view: "reader", label: "返回报告", runId },
+              }),
             }, "查看消息")
           : null);
     })));
@@ -120,7 +130,7 @@ const coverageNote = (group) => {
     : "";
 };
 
-const groupSectionNode = (group, media) => {
+const groupSectionNode = (group, media, runId) => {
   const groupMedia = media.filter((item) => item.groupId === group.groupId).slice(0, 12);
   const isVideoPath = (value) => /\.(mp4|mov|webm|mkv|avi)$/iu.test(value);
 
@@ -128,8 +138,8 @@ const groupSectionNode = (group, media) => {
     el("h2", {}, group.name,
       el("small", {}, `${group.groupId} · 文本 ${group.textMessages} · 媒体 ${group.mediaMessages} · ${group.llmSummary !== null ? "LLM 主题" : "本地分组"}${coverageNote(group)}`)),
     group.llmSummary?.summary ? el("p", { class: "card-sub" }, group.llmSummary.summary) : null,
-    timelineNodes(group),
-    topicNodes(group),
+    timelineNodes(group, runId),
+    topicNodes(group, runId),
     uncategorizedNodes(group),
     groupMedia.length > 0 ? el("h4", { style: "margin:14px 0 4px" }, "媒体抽样") : null,
     groupMedia.length > 0
@@ -181,6 +191,23 @@ const openReader = async (runId) => {
     el("span", { class: "tag plain" }, `文本 ${detail.textMessages}`),
     el("span", { class: "tag plain" }, `媒体 ${detail.mediaMessages}`),
     detail.reportHtml !== null ? el("button", { class: "btn small", onclick: openPath(detail.reportHtml) }, "打开原始 HTML") : null);
+  const scan = detail.scanCoverage;
+  const ai = detail.aiCoverage;
+  const trustCard = el("div", { class: `report-trust ${scan.status === "complete" && ai.status === "complete" ? "complete" : "attention"}`, "data-testid": "report-trust" },
+    el("div", {},
+      el("strong", {}, scan.status === "complete" ? "扫描范围完整" : scan.status === "unknown" ? "扫描完整性未知" : "扫描范围存在缺口"),
+      el("span", {}, scan.status === "unknown"
+        ? "旧报告没有保存扫描覆盖元数据，不能据此断言没有漏消息。"
+        : `${unixToHkt(scan.requestedStartUnix).slice(0, 16)} - ${unixToHkt(scan.requestedEndUnix).slice(5, 16)} · 覆盖 ${Math.round(scan.coverageRatio * 100)}%${scan.missingSeconds > 0 ? ` · 缺失 ${formatDuration(scan.missingSeconds)}` : ""}`)),
+    el("div", {},
+      el("strong", {}, ai.status === "not-used" ? "未使用 AI" : ai.status === "empty" ? "AI 无文本输入" : ai.status === "complete" ? "AI 输入完整" : ai.status === "unknown" ? "AI 输入完整性未知" : "AI 输入不完整"),
+      el("span", {}, ai.status === "not-used"
+        ? "仅本地统计与分组。"
+        : ai.status === "empty"
+          ? "这个范围没有可提交给 AI 的文本消息。"
+        : ai.status === "unknown"
+          ? "旧报告没有保存 AI 输入覆盖元数据，不能判断遗漏了多少文本。"
+          : `AI 实际处理 ${ai.includedMessages}/${ai.totalMessages} 条文本。`)));
 
   const overview = detail.groups.length > 1
     ? el("div", { class: "overview-cards" }, detail.groups.map((group) =>
@@ -221,9 +248,9 @@ const openReader = async (runId) => {
 
   setChildren($("#view-reader"), 
     head,
+    trustCard,
     overview,
     actionsCard,
     risksCard,
-    ...detail.groups.map((group) => groupSectionNode(group, detail.media)));
+    ...detail.groups.map((group) => groupSectionNode(group, detail.media, runId)));
 };
-

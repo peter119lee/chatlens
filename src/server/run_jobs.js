@@ -1,9 +1,17 @@
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
-const { toolRoot } = require("./toolkit_state");
+const {
+  COVERAGE_REPAIR_CHUNK_SECONDS,
+  createCoverageRepairPlan,
+  validateCoverageRepairPlan,
+} = require("../coverage_repair_plan");
+const { loadState: loadCoverageRepairState } = require("../coverage_repair");
+const { loadConfig, toolRoot } = require("./toolkit_state");
 
 const MAX_LOG_LINES = 4000;
+const MINIMUM_COVERAGE_REPAIR_HEADROOM_BYTES = 4 * 1024 * 1024 * 1024;
+const coverageRepairRoot = path.join(toolRoot, "store", "coverage-repairs");
 const TIME_TEXT_PATTERN = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\s*(?:Z|[+-]\d{2}:\d{2}))?$/u;
 // UI times are Beijing time (UTC+8) everywhere; stamp the offset explicitly so
 // PowerShell never parses them in the machine-local timezone — that used to
@@ -24,6 +32,12 @@ const SUMMARY_STAGES = [
 const GROUP_LIST_STAGES = [
   { key: "copy", label: "复制数据库副本" },
   { key: "list", label: "读取群列表" },
+];
+
+const COVERAGE_REPAIR_STAGES = [
+  { key: "copy", label: "复制一次数据库副本" },
+  { key: "repair", label: "分块写入覆盖记录" },
+  { key: "cleanup", label: "清理临时副本" },
 ];
 
 const newStages = (defs) => defs.map((def) => ({ ...def, status: "pending" }));
@@ -54,7 +68,22 @@ const finishStages = (job, status) => {
   }
 };
 
-const RESULT_KEYS = new Set(["runDir", "reportPath", "htmlPath", "messagesText", "mediaDir", "groupIds", "llmModel", "groupListPath"]);
+const RESULT_KEYS = new Set([
+  "runDir",
+  "reportPath",
+  "htmlPath",
+  "messagesText",
+  "mediaDir",
+  "groupIds",
+  "llmModel",
+  "groupListPath",
+  "repairPlanId",
+  "repairCompleted",
+  "repairFailed",
+  "repairMatchedMessages",
+  "repairMatchedMedia",
+  "repairIngestCandidates",
+]);
 
 const applyLine = (job, line) => {
   job.log.push(line);
@@ -64,6 +93,77 @@ const applyLine = (job, line) => {
     job.log.splice(0, dropped);
     job.logBase += dropped;
     job.logTrimmed = true;
+  }
+
+  if (line.startsWith("repairBatch=")) {
+    const match = line.match(/^repairBatch=(\d+)\/(\d+)$/u);
+    if (match !== null) {
+      job.repairCurrent = Number(match[1]);
+      job.repairTotal = Number(match[2]);
+      job.stages = newStages(SUMMARY_STAGES);
+      job.groupsDone = 0;
+      job.groupsCurrent = null;
+    }
+    return;
+  }
+
+  if (line.startsWith("repairPlan=")) {
+    const match = line.match(/^repairPlan=([a-f0-9]{24}) completed=(\d+) failed=(\d+) total=(\d+)$/u);
+    if (match !== null) {
+      job.result.repairPlanId = match[1];
+      job.repairCurrent = Math.min(Number(match[2]) + 1, Number(match[4]));
+      job.repairTotal = Number(match[4]);
+      job.groupsDone = Number(match[2]);
+      job.repairFailures = 0;
+    }
+    return;
+  }
+  if (line.startsWith("repairChunk=")) {
+    const match = line.match(/^repairChunk=(\d+)\/(\d+)$/u);
+    if (match !== null) {
+      job.repairCurrent = Number(match[1]);
+      job.repairTotal = Number(match[2]);
+      setStage(job, "repair");
+    }
+    return;
+  }
+  if (line.startsWith("repairTask ")) {
+    const match = line.match(/\bgroupId=(\d+)\b/u);
+    if (match !== null) {
+      job.groupsCurrent = match[1];
+    }
+    return;
+  }
+  if (line.startsWith("repairChunkDone=")) {
+    job.groupsDone += 1;
+    return;
+  }
+  if (line.startsWith("repairChunkFailed=")) {
+    job.repairFailures += 1;
+    return;
+  }
+  if (line.startsWith("repairFailed=")) {
+    const match = line.match(/^repairFailed=(\d+)$/u);
+    if (match !== null) {
+      job.repairFailures = Number(match[1]);
+      job.result.repairFailed = match[1];
+      if (job.repairFailures > 0) {
+        job.error = `${job.repairFailures} 个补扫块因数据库读取错误未完成；其他成功块已保存，可稍后重试失败块。`;
+      }
+    }
+    return;
+  }
+  if (line === "progress=coverage-copy-start") {
+    setStage(job, "copy");
+    return;
+  }
+  if (line === "progress=coverage-copy-done" || line === "progress=coverage-repair-start") {
+    setStage(job, "repair");
+    return;
+  }
+  if (line === "progress=coverage-cleanup-start" || line === "progress=coverage-cleanup-done") {
+    setStage(job, "cleanup");
+    return;
   }
 
   if (line.includes("prepare-clean-dbs") && line.startsWith(">")) {
@@ -122,7 +222,164 @@ const buildPowershellArgs = (commandText) => [
 
 const quotePs = (value) => `'${String(value).replaceAll("'", "''")}'`;
 
-const spawnJob = (type, label, commandText, stages) => {
+const readJsonFile = (filePath, label) => {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(`${label} could not be read. path=${filePath} cause=${error.message}`);
+  }
+};
+
+const writeJsonAtomic = (filePath, value) => {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.tmp-${process.pid}`;
+  fs.writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  fs.renameSync(tempPath, filePath);
+};
+
+const coverageRepairPaths = (planId) => ({
+  planPath: path.join(coverageRepairRoot, `${planId}.json`),
+  statePath: path.join(coverageRepairRoot, `${planId}.state.json`),
+  workDir: path.join(coverageRepairRoot, `${planId}.work`),
+});
+
+const fileBytes = (filePath, required) => {
+  if (!fs.existsSync(filePath)) {
+    if (required) {
+      throw new Error(`Required file does not exist. path=${filePath}`);
+    }
+    return 0;
+  }
+  const stat = fs.statSync(filePath);
+  if (!stat.isFile()) {
+    throw new Error(`Expected a file. path=${filePath}`);
+  }
+  return stat.size;
+};
+
+const directoryBytes = (directoryPath) => {
+  if (!fs.existsSync(directoryPath)) {
+    return 0;
+  }
+  return fs.readdirSync(directoryPath, { withFileTypes: true }).reduce((total, entry) => {
+    const entryPath = path.join(directoryPath, entry.name);
+    return total + (entry.isDirectory() ? directoryBytes(entryPath) : fileBytes(entryPath, true));
+  }, 0);
+};
+
+const sourceSnapshotBytes = (ntDbDir) => [
+  ["nt_msg.db", true],
+  ["nt_msg.db-wal", false],
+  ["nt_msg.db-shm", false],
+  ["group_info.db", true],
+  ["group_info.db-wal", false],
+  ["group_info.db-shm", false],
+].reduce((total, [name, required]) => total + fileBytes(path.join(ntDbDir, name), required), 0);
+
+const coverageRepairHeadroomBytes = (snapshotBytes) =>
+  Math.max(MINIMUM_COVERAGE_REPAIR_HEADROOM_BYTES, Math.ceil(snapshotBytes * 0.1));
+
+const repairProgressFor = (statePath, plan) => {
+  if (!fs.existsSync(statePath)) {
+    return { completedTaskCount: 0, failedTaskCount: 0 };
+  }
+  const progress = loadCoverageRepairState(statePath, plan);
+  return {
+    completedTaskCount: progress.completedTaskIds.length,
+    failedTaskCount: progress.failedTasks.length,
+  };
+};
+
+const freeDiskBytes = (targetPath) => {
+  const stat = fs.statfsSync(targetPath);
+  return Number(stat.bavail) * Number(stat.bsize);
+};
+
+const estimateCoverageRepair = ({ batches }) => {
+  const plan = createCoverageRepairPlan(batches, COVERAGE_REPAIR_CHUNK_SECONDS);
+  const config = loadConfig();
+  const ntDbDir = String(config.ntDbDir ?? "").trim();
+  if (ntDbDir.length === 0 || !path.isAbsolute(ntDbDir)) {
+    throw new Error(`config.ntDbDir must be an absolute path. value=${config.ntDbDir}`);
+  }
+  const scanLimit = Number(config.defaultScanLimit);
+  if (!Number.isInteger(scanLimit) || scanLimit <= 0) {
+    throw new Error(`config.defaultScanLimit must be a positive integer. value=${config.defaultScanLimit}`);
+  }
+  const paths = coverageRepairPaths(plan.planId);
+  const snapshotBytes = sourceSnapshotBytes(ntDbDir);
+  const existingTemporaryBytes = directoryBytes(paths.workDir);
+  const cleanMessageDb = path.join(paths.workDir, "clean-db", "nt_msg.clean.db");
+  const cleanGroupDb = path.join(paths.workDir, "clean-db", "group_info.clean.db");
+  const snapshotReady = fs.existsSync(cleanMessageDb) && fs.existsSync(cleanGroupDb);
+  const additionalTemporaryBytes = snapshotReady ? 0 : snapshotBytes;
+  const availableBytes = freeDiskBytes(toolRoot);
+  const headroomBytes = coverageRepairHeadroomBytes(snapshotBytes);
+  const requiredFreeBytes = additionalTemporaryBytes + headroomBytes;
+  const progress = repairProgressFor(paths.statePath, plan);
+  return {
+    planId: plan.planId,
+    sourceBatchCount: plan.sourceBatchCount,
+    taskCount: plan.tasks.length,
+    completedTaskCount: progress.completedTaskCount,
+    failedTaskCount: progress.failedTaskCount,
+    groupCount: plan.groupCount,
+    totalGroupSeconds: plan.totalGroupSeconds,
+    chunkSeconds: plan.chunkSeconds,
+    scanLimit,
+    databaseSnapshotBytes: snapshotBytes,
+    existingTemporaryBytes,
+    additionalTemporaryBytes,
+    messageStoreBytes: ["messages.db", "messages.db-wal", "messages.db-shm"]
+      .reduce((total, name) => total + fileBytes(path.join(toolRoot, "store", name), false), 0),
+    freeDiskBytes: availableBytes,
+    headroomBytes,
+    requiredFreeBytes,
+    safeToStart: availableBytes >= requiredFreeBytes,
+    includesLlm: false,
+    includesReports: false,
+    includesMediaCopies: false,
+    runningJob: currentJob !== null && currentJob.status === "running"
+      ? { id: currentJob.id, type: currentJob.type, label: currentJob.label }
+      : null,
+  };
+};
+
+const ensureCoverageRepairPlan = (plan) => {
+  const paths = coverageRepairPaths(plan.planId);
+  fs.mkdirSync(coverageRepairRoot, { recursive: true });
+  if (fs.existsSync(paths.planPath)) {
+    const existing = validateCoverageRepairPlan(readJsonFile(paths.planPath, "Coverage repair plan"));
+    if (existing.chunkSeconds !== plan.chunkSeconds || JSON.stringify(existing.tasks) !== JSON.stringify(plan.tasks)) {
+      throw new Error(`Coverage repair plan id collision. path=${paths.planPath} planId=${plan.planId}`);
+    }
+  } else {
+    writeJsonAtomic(paths.planPath, { ...plan, createdAt: new Date().toISOString() });
+  }
+  return paths;
+};
+
+const buildCoverageRepairCommand = (planPath) => {
+  if (typeof planPath !== "string" || planPath.trim().length === 0 || !path.isAbsolute(planPath)) {
+    throw new TypeError(`Coverage repair plan path must be absolute. value=${planPath}`);
+  }
+  const script = path.join(toolRoot, "scripts", "repair_coverage.ps1");
+  return `& ${quotePs(script)} -PlanPath ${quotePs(planPath)}`;
+};
+
+const safeCleanupPaths = (cleanupPaths) => {
+  const resolvedRoot = path.resolve(coverageRepairRoot);
+  for (const cleanupPath of cleanupPaths) {
+    const resolved = path.resolve(cleanupPath);
+    const relative = path.relative(resolvedRoot, resolved);
+    if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative) || !resolved.endsWith(".work")) {
+      throw new Error(`Refusing to clean a path outside the coverage repair work root. path=${resolved}`);
+    }
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
+};
+
+const spawnJob = (type, label, commandText, stages, cleanupPaths) => {
   if (currentJob !== null && currentJob.status === "running") {
     throw new Error("已有任务在运行中，请等待完成或先取消。");
   }
@@ -140,10 +397,14 @@ const spawnJob = (type, label, commandText, stages) => {
     groupsDone: 0,
     groupsCurrent: null,
     llmFailures: 0,
+    repairFailures: 0,
     log: [],
     logBase: 0,
     logTrimmed: false,
     result: {},
+    repairCurrent: null,
+    repairTotal: null,
+    cleanupPaths: [...cleanupPaths],
   };
 
   // [Console]::OutputEncoding forces UTF-8 on redirected stdout so Chinese log lines survive.
@@ -185,12 +446,30 @@ const spawnJob = (type, label, commandText, stages) => {
     if (buffer.trim().length > 0) {
       applyLine(job, buffer.trim());
     }
+    let cleanupError = null;
+    try {
+      safeCleanupPaths(job.cleanupPaths);
+      if (job.type === "coverage-repair") {
+        const cleanupStage = job.stages.find((stage) => stage.key === "cleanup");
+        if (cleanupStage !== undefined) {
+          cleanupStage.status = "done";
+        }
+      }
+    } catch (error) {
+      cleanupError = error;
+      console.error(JSON.stringify({ event: "job_cleanup_failed", jobId: job.id, error: error.message }));
+    }
     if (job.status === "cancelled") {
+      if (cleanupError !== null) {
+        job.error = `任务已取消，但临时目录清理失败: ${cleanupError.message}`;
+      }
       return;
     }
-    job.status = code === 0 ? "done" : "failed";
+    job.status = code === 0 && cleanupError === null ? "done" : "failed";
     if (code !== 0 && job.error === null) {
       job.error = `进程退出码 ${code}`;
+    } else if (cleanupError !== null) {
+      job.error = `补扫完成，但临时目录清理失败: ${cleanupError.message}`;
     }
     job.endedAt = new Date().toISOString();
     finishStages(job, job.status);
@@ -248,13 +527,35 @@ const startSummaryJob = ({ mode, groupIds, range }) => {
 
   const rangeArgs = buildRangeArgs(range);
   const command = `& ${quotePs(script)} ${target} ${rangeArgs} -NoOpenReport`;
-  return spawnJob("summary", "总结运行", command, SUMMARY_STAGES);
+  return spawnJob("summary", "总结运行", command, SUMMARY_STAGES, []);
+};
+
+const startCoverageRepairJob = ({ batches }) => {
+  if (currentJob !== null && currentJob.status === "running") {
+    throw new Error("已有任务在运行中，请等待完成或先取消。");
+  }
+  const estimate = estimateCoverageRepair({ batches });
+  if (!estimate.safeToStart) {
+    throw new Error(
+      `磁盘空间不足，未启动补扫。freeBytes=${estimate.freeDiskBytes} requiredFreeBytes=${estimate.requiredFreeBytes} databaseSnapshotBytes=${estimate.databaseSnapshotBytes}`,
+    );
+  }
+  const plan = createCoverageRepairPlan(batches, COVERAGE_REPAIR_CHUNK_SECONDS);
+  const paths = ensureCoverageRepairPlan(plan);
+  const command = buildCoverageRepairCommand(paths.planPath);
+  const job = spawnJob("coverage-repair", "安全补扫覆盖记录", command, COVERAGE_REPAIR_STAGES, [paths.workDir]);
+  job.repairCurrent = Math.min(estimate.completedTaskCount + 1, estimate.taskCount);
+  job.repairTotal = estimate.taskCount;
+  job.groupsDone = estimate.completedTaskCount;
+  job.repairFailures = estimate.failedTaskCount;
+  job.result.repairPlanId = plan.planId;
+  return job;
 };
 
 const startGroupListJob = () => {
   const script = path.join(toolRoot, "scripts", "list_groups.ps1");
   const command = `& ${quotePs(script)}`;
-  return spawnJob("group-list", "刷新群列表", command, GROUP_LIST_STAGES);
+  return spawnJob("group-list", "刷新群列表", command, GROUP_LIST_STAGES, []);
 };
 
 /* ---------- quick selection summary (separate lightweight slot) ---------- */
@@ -399,8 +700,11 @@ const jobSnapshot = (cursor) => {
       groupsDone: currentJob.groupsDone,
       groupsCurrent: currentJob.groupsCurrent,
       llmFailures: currentJob.llmFailures,
+      repairFailures: currentJob.repairFailures,
       logTrimmed: currentJob.logTrimmed,
       result: currentJob.result,
+      repairCurrent: currentJob.repairCurrent,
+      repairTotal: currentJob.repairTotal,
     },
     lines: currentJob.log.slice(safeCursor),
     cursor: absoluteEnd,
@@ -409,10 +713,14 @@ const jobSnapshot = (cursor) => {
 
 module.exports = {
   startSummaryJob,
+  startCoverageRepairJob,
   startGroupListJob,
   cancelJob,
   jobSnapshot,
   startQuickSummaryJob,
   quickSummarySnapshot,
   quotePs,
+  buildCoverageRepairCommand,
+  estimateCoverageRepair,
+  safeCleanupPaths,
 };

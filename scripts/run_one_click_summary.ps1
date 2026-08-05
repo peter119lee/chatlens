@@ -420,15 +420,6 @@ try {
             throw "复制数据库副本失败（ExitCode=$LASTEXITCODE）。请确认设置页的 QQ 数据库路径正确、磁盘空间充足。"
         }
 
-        $storeRetentionDays = 3
-        $storeProperty = $config.PSObject.Properties['store']
-        if ($null -ne $storeProperty -and $null -ne $storeProperty.Value) {
-            $retentionProperty = $storeProperty.Value.PSObject.Properties['retentionDays']
-            if ($null -ne $retentionProperty -and [int]$retentionProperty.Value -gt 0) {
-                $storeRetentionDays = [int]$retentionProperty.Value
-            }
-        }
-
         $summaryArgs = @{
             RunDir = $runDir
             GroupIdsCsv = (Join-GroupIdsCsv -GroupIds $selectedGroupIds)
@@ -436,7 +427,18 @@ try {
             EndUnix = ([long]$timeRange.EndUnix)
             ScanLimit = $actualScanLimit
             StoreDbPath = (Join-Path $toolRoot 'store\messages.db')
-            StoreRetentionDays = $storeRetentionDays
+        }
+
+        # Image-parameter harvesting needs nt_data; when it is unset the run
+        # simply skips that step, exactly as media export does.
+        $ntDataForKnowledge = ''
+        $ntDataKnowledgeProperty = $config.PSObject.Properties['ntDataDir']
+        if ($null -ne $ntDataKnowledgeProperty -and $null -ne $ntDataKnowledgeProperty.Value) {
+            $ntDataForKnowledge = [string]$ntDataKnowledgeProperty.Value
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ntDataForKnowledge) -and (Test-Path -LiteralPath $ntDataForKnowledge)) {
+            $summaryArgs.KnowledgeDbPath = (Join-Path $toolRoot 'store\knowledge.db')
+            $summaryArgs.NtDataDir = $ntDataForKnowledge
         }
         if ($null -ne $llmOptions) {
             $summaryArgs.UseLlm = $true
@@ -472,7 +474,10 @@ try {
                 npm run export-media -- `
                     -RunDir $runDir `
                     -NtDataDir $ntDataDirValue `
-                    -FormatsCsv $formatsCsv
+                    -FormatsCsv $formatsCsv `
+                    -ObjectDir (Join-Path $toolRoot 'store\media-objects') `
+                    -KnowledgeDbPath (Join-Path $toolRoot 'store\knowledge.db') `
+                    -ToolRoot $toolRoot
                 if ($LASTEXITCODE -ne 0) {
                     Write-Warning "媒体导出失败（ExitCode=$LASTEXITCODE），本次报告将没有本地媒体预览，其余不受影响。"
                 }

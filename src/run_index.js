@@ -113,6 +113,122 @@ const summarizeTopics = (analysis) => {
     .join(" / ") || "No summary";
 };
 
+const numberOrNull = (value) => Number.isFinite(value) ? value : null;
+
+const collectScanCoverage = (runDir) => {
+  const exportsDir = path.join(runDir, "exports");
+  if (!pathExists(exportsDir)) {
+    return {
+      status: "unknown",
+      coverageRatio: null,
+      coveredSeconds: null,
+      missingSeconds: null,
+      requestedStartUnix: null,
+      requestedEndUnix: null,
+    };
+  }
+
+  const exports = fs
+    .readdirSync(exportsDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+    .map((entry) => {
+      const value = readJson(path.join(exportsDir, entry.name));
+      const startUnix = numberOrNull(value.startUnix);
+      const endUnix = numberOrNull(value.endUnix);
+      const groupIds = Array.isArray(value.groupIds) ? value.groupIds.map(String) : [];
+      if (startUnix === null || endUnix === null || startUnix >= endUnix || groupIds.length === 0) {
+        return null;
+      }
+      const coveredFromUnix = Object.prototype.hasOwnProperty.call(value, "coveredFromUnix")
+        ? numberOrNull(value.coveredFromUnix)
+        : startUnix;
+      const coveredStartUnix = coveredFromUnix === null ? endUnix : Math.max(startUnix, Math.min(endUnix, coveredFromUnix));
+      return { startUnix, endUnix, coveredStartUnix, groupCount: groupIds.length };
+    })
+    .filter((entry) => entry !== null);
+
+  if (exports.length === 0) {
+    return {
+      status: "unknown",
+      coverageRatio: null,
+      coveredSeconds: null,
+      missingSeconds: null,
+      requestedStartUnix: null,
+      requestedEndUnix: null,
+    };
+  }
+
+  const totalSeconds = exports.reduce(
+    (total, entry) => total + (entry.endUnix - entry.startUnix) * entry.groupCount,
+    0,
+  );
+  const coveredSeconds = exports.reduce(
+    (total, entry) => total + (entry.endUnix - entry.coveredStartUnix) * entry.groupCount,
+    0,
+  );
+  const coverageRatio = totalSeconds > 0 ? coveredSeconds / totalSeconds : 0;
+  return {
+    status: coverageRatio >= 0.999 ? "complete" : coverageRatio > 0 ? "partial" : "none",
+    coverageRatio,
+    coveredSeconds,
+    missingSeconds: totalSeconds - coveredSeconds,
+    requestedStartUnix: Math.min(...exports.map((entry) => entry.startUnix)),
+    requestedEndUnix: Math.max(...exports.map((entry) => entry.endUnix)),
+  };
+};
+
+const llmCoverageRows = (runDir, analysis, digest) => {
+  const groupsDir = path.join(runDir, "analysis", "groups");
+  if (digest !== null && pathExists(groupsDir)) {
+    return fs
+      .readdirSync(groupsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => {
+        const analysisPath = path.join(groupsDir, entry.name, "analysis.json");
+        return pathExists(analysisPath) ? readJson(analysisPath) : null;
+      })
+      .filter((entry) => entry !== null)
+      .map((entry) => ({
+        total: entry.llmSummary?.coverage?.totalTextMessages ?? entry.parsedTextMessages ?? 0,
+        included: entry.llmSummary?.coverage?.includedTextMessages ?? null,
+        used: entry.llmSummary !== null && entry.llmSummary !== undefined,
+      }));
+  }
+  return [{
+    total: analysis.llmSummary?.coverage?.totalTextMessages ?? analysis.parsedTextMessages ?? 0,
+    included: analysis.llmSummary?.coverage?.includedTextMessages ?? null,
+    used: analysis.llmSummary !== null && analysis.llmSummary !== undefined,
+  }];
+};
+
+const collectAiCoverage = (runDir, analysis, digest) => {
+  const rows = llmCoverageRows(runDir, analysis, digest);
+  const usedRows = rows.filter((row) => row.used);
+  if (usedRows.length === 0) {
+    return { status: "not-used", coverageRatio: null, includedMessages: 0, totalMessages: 0 };
+  }
+  if (usedRows.some((row) => !Number.isFinite(row.included))) {
+    return {
+      status: "unknown",
+      coverageRatio: null,
+      includedMessages: null,
+      totalMessages: rows.reduce((total, row) => total + row.total, 0),
+    };
+  }
+  const totalMessages = rows.reduce((total, row) => total + row.total, 0);
+  const includedMessages = rows.reduce((total, row) => total + row.included, 0);
+  if (totalMessages === 0) {
+    return { status: "empty", coverageRatio: 1, includedMessages: 0, totalMessages: 0 };
+  }
+  const coverageRatio = totalMessages > 0 ? includedMessages / totalMessages : 1;
+  return {
+    status: coverageRatio >= 0.999 ? "complete" : "partial",
+    coverageRatio,
+    includedMessages,
+    totalMessages,
+  };
+};
+
 // A run left behind with truncated/corrupt JSON must not take down the whole listing.
 const collectRun = (runDir, reportsDir) => {
   try {
@@ -142,6 +258,8 @@ const collectRunUnsafe = (runDir, reportsDir) => {
   const mediaBytes = dirSize(mediaDir);
   const cleanDbBytes = dirSize(cleanDbDir);
   const runBytes = dirSize(runDir);
+  const scanCoverage = collectScanCoverage(runDir);
+  const aiCoverage = collectAiCoverage(runDir, analysis, digest);
 
   return {
     runId,
@@ -171,6 +289,9 @@ const collectRunUnsafe = (runDir, reportsDir) => {
     mediaBytes,
     cleanDbBytes,
     runBytes,
+    groupIds: (analysis.groupIds ?? []).map(String),
+    scanCoverage,
+    aiCoverage,
     createdMs: parseRunTimestamp(runId),
     mtimeMs: latestMtime(runDir),
   };
@@ -196,4 +317,6 @@ module.exports = {
   parseRunTimestamp,
   collectRun,
   collectRuns,
+  collectScanCoverage,
+  collectAiCoverage,
 };

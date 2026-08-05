@@ -6,8 +6,11 @@ const { spawn } = require("node:child_process");
 const state = require("./toolkit_state");
 const jobs = require("./run_jobs");
 const settings = require("./settings_ops");
+const storage = require("./storage_ops");
 const scheduler = require("./scheduler_ops");
 const update = require("./update_ops");
+const knowledge = require("./knowledge_ops");
+const knowledgeExport = require("../knowledge_export");
 
 const BASE_PORT = 8321;
 const MAX_PORT_ATTEMPTS = 10;
@@ -121,6 +124,43 @@ const serveRunsFile = (response, urlPath) => {
   serveStaticFile(response, resolved, "application/octet-stream");
 };
 
+// Serves a knowledge-base image out of the QQ cache or protected media store.
+//
+// The path is NEVER taken from the request: the caller supplies a 32-hex md5,
+// which is looked up in the store, and the stored path is then confirmed to sit
+// inside either configured nt_data or store/media-objects. So this cannot be
+// walked to read arbitrary files even if the store were somehow tampered with.
+//
+// `thumb` serves QQ's own reduced copy instead of the original. Grid cards use
+// it because full-resolution originals cost ~2 MB each and ~14 MB of decoded
+// bitmap, which made a 60-card page allocate hundreds of MB.
+const serveKnowledgeImage = (response, hash, { thumb = false } = {}) => {
+  const filePath = thumb
+    ? (knowledge.thumbnailFilePath(state.toolRoot, hash) ?? knowledge.imageFilePath(state.toolRoot, hash))
+    : knowledge.imageFilePath(state.toolRoot, hash);
+  if (filePath === null) {
+    sendError(response, 404, "Not found");
+    return;
+  }
+
+  const config = state.loadConfig();
+  const resolved = path.resolve(filePath);
+  const allowedRoots = [
+    String(config.ntDataDir ?? ""),
+    path.join(state.toolRoot, "store", "media-objects"),
+  ].filter((root) => root !== "");
+  const allowed = allowedRoots.some((root) => {
+    const rootCheck = path.relative(path.resolve(root), resolved);
+    return !rootCheck.startsWith("..") && !path.isAbsolute(rootCheck);
+  });
+  if (!allowed) {
+    sendError(response, 403, "Forbidden");
+    return;
+  }
+
+  serveStaticFile(response, resolved, "application/octet-stream");
+};
+
 const serveIndex = (response) => {
   const indexPath = path.join(webDir, "index.html");
   const html = fs.readFileSync(indexPath, "utf8").replace("__CC_TOKEN__", token);
@@ -128,12 +168,9 @@ const serveIndex = (response) => {
   response.end(html);
 };
 
-const openLocalPath = (targetPath) => {
+const launchExplorer = (targetPath) => {
   if (typeof targetPath !== "string" || targetPath.trim().length === 0) {
     throw new Error("path is required");
-  }
-  if (!state.isPathAllowedToOpen(targetPath)) {
-    throw new Error("Path is outside the reports/runs directories");
   }
   if (!fs.existsSync(targetPath)) {
     throw new Error(`Path does not exist: ${targetPath}`);
@@ -142,6 +179,27 @@ const openLocalPath = (targetPath) => {
   const child = spawn("explorer.exe", [path.resolve(targetPath)], { windowsHide: true, detached: true, stdio: "ignore" });
   child.on("error", (error) => console.error(`explorer.exe failed: ${error.message}`));
   child.unref();
+};
+
+const openLocalPath = (targetPath) => {
+  if (!state.isPathAllowedToOpen(targetPath)) {
+    throw new Error("Path is outside the reports/runs directories");
+  }
+  launchExplorer(targetPath);
+};
+
+const storageContext = () => {
+  const job = jobs.jobSnapshot(0).job;
+  const quickJob = jobs.quickSummarySnapshot().job;
+  return {
+    toolRoot: state.toolRoot,
+    secretDir: settings.getSecretDirectory(),
+    config: state.loadConfig(),
+    activity: {
+      jobRunning: job?.status === "running",
+      quickSummaryRunning: quickJob?.status === "running",
+    },
+  };
 };
 
 const handleApi = async (request, response, url) => {
@@ -177,6 +235,21 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/store-timeline") {
+      sendJson(response, 200, state.getStoreTimeline(Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/gallery-range") {
+      sendJson(response, 200, state.getGalleryRange(Object.fromEntries(url.searchParams)));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/gallery-event-activity") {
+      sendJson(response, 200, state.getGalleryEventActivity(await readBody(request)));
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/readmark") {
       const body = await readBody(request);
       sendJson(response, 200, { readMark: state.saveReadMark(body) });
@@ -188,10 +261,132 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/api/knowledge/overview") {
+      sendJson(response, 200, knowledge.overview(state.toolRoot));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/knowledge/search") {
+      sendJson(response, 200, knowledge.searchImages(state.toolRoot, {
+        query: url.searchParams.get("q") ?? "",
+        generator: url.searchParams.get("generator") ?? "",
+        groupId: url.searchParams.get("groupId") ?? "",
+        sender: url.searchParams.get("sender") ?? "",
+        sort: url.searchParams.get("sort") ?? "recent",
+        limit: url.searchParams.get("limit"),
+        offset: Number.parseInt(url.searchParams.get("offset") ?? "0", 10) || 0,
+      }));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/knowledge/requests") {
+      sendJson(response, 200, knowledge.promptRequests(state.toolRoot, {
+        onlyAnswered: url.searchParams.get("answered") === "1",
+        limit: url.searchParams.get("limit"),
+      }));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/knowledge/coverage") {
+      sendJson(response, 200, knowledge.coverage(state.toolRoot, {
+        since: Number.parseInt(url.searchParams.get("since") ?? "0", 10) || 0,
+      }));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/knowledge/export-preview") {
+      const rawHashes = url.searchParams.get("hashes");
+      const collected = knowledge.collectForExport(state.toolRoot, {
+        query: url.searchParams.get("q") ?? "",
+        generator: url.searchParams.get("generator") ?? "",
+        groupId: url.searchParams.get("groupId") ?? "",
+        sender: url.searchParams.get("sender") ?? "",
+        sort: url.searchParams.get("sort") ?? "recent",
+        // Same selection the export will use, so the estimate cannot describe a
+        // different set from what gets written.
+        hashes: rawHashes === null || rawHashes === "" ? null : rawHashes.split(","),
+      });
+      const mode = url.searchParams.get("mode") === "all" ? "all" : "new";
+      sendJson(response, 200, {
+        available: collected.available,
+        matched: collected.items.length,
+        ...knowledgeExport.previewExport(state.toolRoot, collected.items, mode),
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/knowledge/export") {
+      const body = await readBody(request);
+      const collected = knowledge.collectForExport(state.toolRoot, {
+        query: body.query ?? "",
+        generator: body.generator ?? "",
+        groupId: body.groupId ?? "",
+        sender: body.sender ?? "",
+        sort: body.sort ?? "recent",
+        limit: Number.parseInt(body.limit ?? "0", 10) || 0,
+        hashes: Array.isArray(body.hashes) ? body.hashes : null,
+      });
+      if (!collected.available) {
+        sendError(response, 404, "还没有咒语库");
+        return;
+      }
+      const outputDir = state.resolveKnowledgeExportDir(body.label);
+      const result = knowledgeExport.exportImages({
+        toolRoot: state.toolRoot,
+        outputDir,
+        items: collected.items,
+        mode: body.mode === "all" ? "all" : "new",
+        includeImages: body.includeImages !== false,
+        includeSidecars: body.includeSidecars !== false,
+        includeIndex: body.includeIndex !== false,
+        verifyHash: body.verifyHash === true,
+      });
+
+      // Report whether the folder REALLY opened. Previously the response claimed
+      // it had regardless, and a failure here would have thrown past the reply.
+      let folderOpened = false;
+      let openError = null;
+      if (result.exported > 0 && body.openFolder !== false) {
+        try {
+          openLocalPath(result.outputDir);
+          folderOpened = true;
+        } catch (error) {
+          openError = error.message;
+        }
+      }
+      sendJson(response, 200, {
+        ...result,
+        records: undefined,
+        recordCount: result.records.length,
+        folderOpened,
+        openError,
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/knowledge/forget-exports") {
+      const body = await readBody(request);
+      const hashes = Array.isArray(body.hashes) ? body.hashes : null;
+      sendJson(response, 200, knowledgeExport.forgetExports(state.toolRoot, hashes));
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/knowledge/image") {
+      const image = knowledge.imageByHash(state.toolRoot, url.searchParams.get("hash"));
+      if (image === null) {
+        sendError(response, 404, "Not found");
+        return;
+      }
+      sendJson(response, 200, image);
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/media-export") {
       const body = await readBody(request);
-      const result = state.exportMediaSelection(body.paths);
-      openLocalPath(result.folder);
+      const result = state.exportMediaSelection(body.paths, body.folder ?? null);
+      if (body.openFolder === true) {
+        openLocalPath(result.folder);
+      }
       sendJson(response, 200, result);
       return;
     }
@@ -228,6 +423,19 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/run/repair-coverage/estimate") {
+      const body = await readBody(request);
+      sendJson(response, 200, jobs.estimateCoverageRepair({ batches: body.batches }));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/run/repair-coverage") {
+      const body = await readBody(request);
+      const job = jobs.startCoverageRepairJob({ batches: body.batches });
+      sendJson(response, 200, { started: true, jobId: job.id });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/grouplist/refresh") {
       const job = jobs.startGroupListJob();
       sendJson(response, 200, { started: true, jobId: job.id });
@@ -250,6 +458,13 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/api/group-sets") {
+      const body = await readBody(request);
+      const groupSets = state.updateGroupSets({ save: body.save, remove: body.remove });
+      sendJson(response, 200, { groupSets });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/api/open") {
       const body = await readBody(request);
       openLocalPath(body.path);
@@ -257,12 +472,32 @@ const handleApi = async (request, response, url) => {
       return;
     }
 
-    if (request.method === "POST" && url.pathname === "/api/cleanup") {
+    if (request.method === "GET" && url.pathname === "/api/storage/overview") {
+      sendJson(response, 200, storage.getStorageOverview(storageContext()));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/storage/measure") {
       const body = await readBody(request);
-      const days = Number.parseInt(body.olderThanDays, 10);
-      sendJson(response, 200, state.cleanupGeneratedData({
-        olderThanDays: Number.isInteger(days) && days > 0 ? days : 0,
-      }));
+      sendJson(response, 200, await storage.measureStorageCategory(storageContext(), body.category));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/storage/cleanup") {
+      const body = await readBody(request);
+      sendJson(response, 200, await storage.cleanupStorageCategory(
+        storageContext(),
+        body.category,
+        body.confirmation,
+      ));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/storage/open") {
+      const body = await readBody(request);
+      const targetPath = storage.resolveStorageOpenPath(storageContext(), body.category);
+      launchExplorer(targetPath);
+      sendJson(response, 200, { opened: true, category: body.category });
       return;
     }
 
@@ -323,12 +558,6 @@ const handleApi = async (request, response, url) => {
 
     if (request.method === "POST" && url.pathname === "/api/update/apply") {
       sendJson(response, 200, await update.applyUpdate());
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/settings/store") {
-      const body = await readBody(request);
-      sendJson(response, 200, settings.saveStoreConfig(body));
       return;
     }
 
@@ -403,6 +632,17 @@ const handleRequest = (request, response) => {
 
     if (url.pathname.startsWith("/runs/")) {
       serveRunsFile(response, url.pathname);
+      return;
+    }
+
+    // Alongside /runs/ rather than behind the API token, because <img src> and
+    // <video src> cannot send the x-cc-token header. Same protection as /runs/:
+    // the server binds to 127.0.0.1 only, and the path is resolved from a
+    // store-held md5 that must live under the configured nt_data directory.
+    if (url.pathname === "/knowledge-file") {
+      serveKnowledgeImage(response, url.searchParams.get("hash"), {
+        thumb: url.searchParams.get("thumb") === "1",
+      });
       return;
     }
 

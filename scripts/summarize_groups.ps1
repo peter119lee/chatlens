@@ -40,7 +40,10 @@ param(
     [string]$StoreDbPath,
 
     [Parameter(Mandatory = $false)]
-    [int]$StoreRetentionDays
+    [string]$KnowledgeDbPath,
+
+    [Parameter(Mandatory = $false)]
+    [string]$NtDataDir
 )
 
 Set-StrictMode -Version 2.0
@@ -89,9 +92,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "progress=export-done"
 
 if (-not [string]::IsNullOrWhiteSpace($StoreDbPath)) {
-    $retention = if ($StoreRetentionDays -gt 0) { $StoreRetentionDays } else { 30 }
     $runId = Split-Path $RunDir -Leaf
-    node "$PSScriptRoot\..\src\ingest_store.js" $exportPath $StoreDbPath $retention $runId | Out-Host
+    node "$PSScriptRoot\..\src\ingest_store.js" $exportPath $StoreDbPath $runId | Out-Host
     if ($LASTEXITCODE -ne 0) {
         # The message store is a convenience cache; a failed ingest should not kill the run.
         Write-Warning "消息库写入失败（ExitCode=$LASTEXITCODE），「消息」页可能缺这次的数据；报告不受影响。"
@@ -104,6 +106,21 @@ if ($LASTEXITCODE -ne 0) {
     throw "分析消息失败（ExitCode=$LASTEXITCODE）。ExportPath=$exportPath"
 }
 Write-Host "progress=analyze-done"
+
+# Harvest AI generation parameters while the messages are still in the cache:
+# this is the only moment both the image and the sender are available, because
+# QQ evicts cached originals well before the chat history goes.
+if (-not [string]::IsNullOrWhiteSpace($KnowledgeDbPath) -and -not [string]::IsNullOrWhiteSpace($NtDataDir)) {
+    $mediaMessagesPath = Join-Path $analysisDir 'media-messages.json'
+    if (Test-Path -LiteralPath $mediaMessagesPath) {
+        node "$PSScriptRoot\..\src\harvest_run_media.js" $mediaMessagesPath $NtDataDir $KnowledgeDbPath $exportPath | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            # The knowledge base is an extra; never fail a summary run over it.
+            Write-Warning "图片参数入库失败（ExitCode=$LASTEXITCODE），本次报告不受影响。"
+        }
+        Write-Host "progress=knowledge-done"
+    }
+}
 
 if ($UseLlm.IsPresent) {
     if ([string]::IsNullOrWhiteSpace($LlmBaseUrl)) {

@@ -2,8 +2,6 @@ const fs = require("node:fs");
 const path = require("node:path");
 const Database = require("better-sqlite3-multiple-ciphers");
 
-const DAY_SECONDS = 24 * 60 * 60;
-
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS messages (
     group_id TEXT NOT NULL,
@@ -93,7 +91,7 @@ const mediaText = (message) => {
   return { kinds, text };
 };
 
-const ingestExport = (db, exportData, runId, retentionDays) => {
+const ingestExport = (db, exportData, runId) => {
   const insertMessage = db.prepare(`
     INSERT OR IGNORE INTO messages (group_id, row_id, sent_at, speaker, text, is_media, media_kinds, speaker_uin)
     VALUES (@groupId, @rowId, @sentAt, @speaker, @text, @isMedia, @mediaKinds, @speakerUin)
@@ -152,21 +150,7 @@ const ingestExport = (db, exportData, runId, retentionDays) => {
     }
   });
   ingestAll();
-
-  const pruned = pruneStore(db, retentionDays);
-  return { inserted, ...pruned };
-};
-
-const pruneStore = (db, retentionDays) => {
-  const days = Number.isFinite(retentionDays) && retentionDays > 0 ? retentionDays : 30;
-  const cutoff = Math.floor(Date.now() / 1000) - days * DAY_SECONDS;
-  const prunedMessages = db.prepare("DELETE FROM messages WHERE sent_at < ?").run(cutoff).changes;
-  const prunedRanges = db.prepare("DELETE FROM scan_ranges WHERE end_unix < ?").run(cutoff).changes;
-  // Coverage must not keep claiming the pruned span: clamp surviving ranges
-  // that started before the cutoff, otherwise the UI reports "covered" for
-  // messages retention just deleted (the 30-day-scan / 3-day-store trap).
-  const clampedRanges = db.prepare("UPDATE scan_ranges SET start_unix = ? WHERE start_unix < ? AND end_unix >= ?").run(cutoff, cutoff, cutoff).changes;
-  return { prunedMessages, prunedRanges, clampedRanges, cutoff };
+  return { inserted };
 };
 
 const queryMessages = (db, { groupId, fromUnix, toUnix, afterSentAt, afterRowId, beforeSentAt, beforeRowId, limit, search }) => {
@@ -247,6 +231,299 @@ const getCoverage = (db, groupId) => {
   return merged;
 };
 
+const coverageGaps = (coverage, fromUnix, toUnix) => {
+  const gaps = [];
+  let cursor = fromUnix;
+  for (const range of coverage) {
+    const startUnix = Math.max(fromUnix, range.startUnix);
+    const endUnix = Math.min(toUnix, range.endUnix);
+    if (endUnix <= fromUnix || startUnix >= toUnix) {
+      continue;
+    }
+    if (startUnix > cursor) {
+      gaps.push({ startUnix: cursor, endUnix: startUnix });
+    }
+    cursor = Math.max(cursor, endUnix);
+  }
+  if (cursor < toUnix) {
+    gaps.push({ startUnix: cursor, endUnix: toUnix });
+  }
+  return gaps;
+};
+
+const rescanBatches = (gaps) => {
+  const grouped = new Map();
+  for (const gap of gaps) {
+    const key = `${gap.startUnix}:${gap.endUnix}`;
+    const groupIds = grouped.get(key) ?? [];
+    grouped.set(key, [...groupIds, gap.groupId]);
+  }
+  return [...grouped.entries()]
+    .map(([key, groupIds]) => {
+      const [startUnix, endUnix] = key.split(":").map(Number);
+      return { groupIds: [...groupIds].sort(), startUnix, endUnix };
+    })
+    .sort((left, right) => left.startUnix - right.startUnix || left.endUnix - right.endUnix);
+};
+
+const getCoverageHealth = (db, groupIds, fromUnix, toUnix) => {
+  const normalizedGroupIds = [...new Set(groupIds.map(String))];
+  if (normalizedGroupIds.length === 0) {
+    throw new Error("At least one group id is required to calculate coverage health");
+  }
+  if (!Number.isFinite(fromUnix) || !Number.isFinite(toUnix) || fromUnix >= toUnix) {
+    throw new Error(`Invalid coverage health range: ${fromUnix}-${toUnix}`);
+  }
+
+  const gaps = normalizedGroupIds.flatMap((groupId) =>
+    coverageGaps(getCoverage(db, groupId), fromUnix, toUnix)
+      .map((gap) => ({ groupId, ...gap })));
+  const totalSeconds = (toUnix - fromUnix) * normalizedGroupIds.length;
+  const missingSeconds = gaps.reduce((total, gap) => total + gap.endUnix - gap.startUnix, 0);
+  const affectedGroupCount = new Set(gaps.map((gap) => gap.groupId)).size;
+
+  return {
+    fromUnix,
+    toUnix,
+    groupCount: normalizedGroupIds.length,
+    totalSeconds,
+    coveredSeconds: totalSeconds - missingSeconds,
+    missingSeconds,
+    coverageRatio: (totalSeconds - missingSeconds) / totalSeconds,
+    affectedGroupCount,
+    earliestGapUnix: gaps.length > 0 ? Math.min(...gaps.map((gap) => gap.startUnix)) : null,
+    gaps,
+    batches: rescanBatches(gaps),
+  };
+};
+
+const getRangeActivity = (db, groupIds, fromUnix, toUnix) => {
+  const normalizedGroupIds = [...new Set(groupIds.map(String))];
+  if (normalizedGroupIds.length === 0) {
+    throw new Error("At least one group id is required to calculate range activity");
+  }
+  if (!Number.isFinite(fromUnix) || !Number.isFinite(toUnix) || fromUnix >= toUnix) {
+    throw new Error(`Invalid range activity window: ${fromUnix}-${toUnix}`);
+  }
+  const groupParams = Object.fromEntries(normalizedGroupIds.map((groupId, index) => [`group${index}`, groupId]));
+  const placeholders = normalizedGroupIds.map((_, index) => `@group${index}`).join(", ");
+  const rows = db.prepare(`
+    SELECT group_id AS groupId,
+           COUNT(*) AS messageCount,
+           SUM(CASE WHEN is_media = 1 THEN 1 ELSE 0 END) AS mediaMessageCount
+    FROM messages
+    WHERE group_id IN (${placeholders})
+      AND sent_at >= @fromUnix
+      AND sent_at < @toUnix
+    GROUP BY group_id
+  `).all({ ...groupParams, fromUnix, toUnix });
+  const activityByGroup = new Map(rows.map((row) => [row.groupId, row]));
+  const durationSeconds = toUnix - fromUnix;
+  return normalizedGroupIds.map((groupId) => {
+    const coveredSeconds = getCoverage(db, groupId).reduce(
+      (total, range) => total + overlapSeconds(range.startUnix, range.endUnix, fromUnix, toUnix),
+      0,
+    );
+    const activity = activityByGroup.get(groupId);
+    return {
+      groupId,
+      messageCount: activity?.messageCount ?? 0,
+      mediaMessageCount: activity?.mediaMessageCount ?? 0,
+      coveredSeconds,
+      coverageRatio: coveredSeconds / durationSeconds,
+    };
+  });
+};
+
+const getEventActivity = (db, events) => {
+  if (!Array.isArray(events) || events.length === 0 || events.length > 400) {
+    throw new Error("Event activity requires 1-400 events");
+  }
+  const query = db.prepare(`
+    SELECT COUNT(*) AS messageCount,
+           SUM(CASE WHEN is_media = 1 THEN 1 ELSE 0 END) AS mediaMessageCount,
+           COUNT(DISTINCT speaker) AS speakerCount,
+           MIN(sent_at) AS firstMessageUnix,
+           MAX(sent_at) AS lastMessageUnix
+    FROM messages
+    WHERE group_id = @groupId
+      AND sent_at >= @fromUnix
+      AND sent_at < @toUnix
+  `);
+  return events.map((event) => {
+    const id = String(event.id ?? "");
+    const groupId = String(event.groupId ?? "");
+    const fromUnix = Number(event.fromUnix);
+    const toUnix = Number(event.toUnix);
+    if (id.length === 0 || !/^\d+$/u.test(groupId) || !Number.isFinite(fromUnix) || !Number.isFinite(toUnix) || fromUnix >= toUnix) {
+      throw new Error(`Invalid gallery event activity request: ${id}/${groupId}/${fromUnix}-${toUnix}`);
+    }
+    const activity = query.get({ groupId, fromUnix, toUnix });
+    const durationSeconds = toUnix - fromUnix;
+    const coveredSeconds = getCoverage(db, groupId).reduce(
+      (total, range) => total + overlapSeconds(range.startUnix, range.endUnix, fromUnix, toUnix),
+      0,
+    );
+    return {
+      id,
+      messageCount: activity.messageCount,
+      mediaMessageCount: activity.mediaMessageCount ?? 0,
+      speakerCount: activity.speakerCount,
+      firstMessageUnix: activity.firstMessageUnix ?? null,
+      lastMessageUnix: activity.lastMessageUnix ?? null,
+      coverageRatio: coveredSeconds / durationSeconds,
+      missingSeconds: durationSeconds - coveredSeconds,
+    };
+  });
+};
+
+const overlapSeconds = (leftStart, leftEnd, rightStart, rightEnd) =>
+  Math.max(0, Math.min(leftEnd, rightEnd) - Math.max(leftStart, rightStart));
+
+const getCoverageTimeline = (db, groupIds, fromUnix, toUnix, slotSeconds) => {
+  const normalizedGroupIds = [...new Set(groupIds.map(String))];
+  if (normalizedGroupIds.length === 0) {
+    return [];
+  }
+
+  const slotCount = Math.ceil((toUnix - fromUnix) / slotSeconds);
+  const slotBounds = Array.from({ length: slotCount }, (_, index) => ({
+    index,
+    startUnix: fromUnix + index * slotSeconds,
+    endUnix: Math.min(toUnix, fromUnix + (index + 1) * slotSeconds),
+  }));
+  const groupParams = Object.fromEntries(normalizedGroupIds.map((groupId, index) => [`group${index}`, groupId]));
+  const placeholders = normalizedGroupIds.map((_, index) => `@group${index}`).join(", ");
+  const queryParams = { fromUnix, toUnix, slotSeconds, ...groupParams };
+  const names = new Map(
+    db
+      .prepare(`SELECT group_id AS groupId, name FROM group_names WHERE group_id IN (${placeholders})`)
+      .all(groupParams)
+      .map((row) => [row.groupId, row.name]),
+  );
+  const activityRows = db
+    .prepare(`
+      WITH slotted AS (
+        SELECT group_id AS groupId,
+               CAST((sent_at - @fromUnix) / @slotSeconds AS INTEGER) AS slotIndex,
+               sent_at AS sentAt,
+               speaker,
+               is_media AS isMedia
+        FROM messages
+        WHERE group_id IN (${placeholders})
+          AND sent_at >= @fromUnix
+          AND sent_at < @toUnix
+      )
+      SELECT groupId,
+             slotIndex,
+             COUNT(*) AS messageCount,
+             SUM(CASE WHEN isMedia = 0 THEN 1 ELSE 0 END) AS textCount,
+             SUM(CASE WHEN isMedia = 1 THEN 1 ELSE 0 END) AS mediaCount,
+             COUNT(DISTINCT speaker) AS speakerCount,
+             MIN(sentAt) AS firstMessageUnix,
+             MAX(sentAt) AS lastMessageUnix
+      FROM slotted
+      GROUP BY groupId, slotIndex
+    `)
+    .all(queryParams);
+  const activityBySlot = new Map(activityRows.map((row) => [`${row.groupId}:${row.slotIndex}`, row]));
+  const topSpeakerRows = db
+    .prepare(`
+      WITH speaker_counts AS (
+        SELECT group_id AS groupId,
+               CAST((sent_at - @fromUnix) / @slotSeconds AS INTEGER) AS slotIndex,
+               speaker,
+               COUNT(*) AS messageCount
+        FROM messages
+        WHERE group_id IN (${placeholders})
+          AND sent_at >= @fromUnix
+          AND sent_at < @toUnix
+        GROUP BY groupId, slotIndex, speaker
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY groupId, slotIndex
+          ORDER BY messageCount DESC, speaker ASC
+        ) AS speakerRank
+        FROM speaker_counts
+      )
+      SELECT groupId, slotIndex, speaker, messageCount
+      FROM ranked
+      WHERE speakerRank <= 3
+      ORDER BY groupId, slotIndex, speakerRank
+    `)
+    .all(queryParams);
+  const topSpeakersBySlot = new Map();
+  for (const row of topSpeakerRows) {
+    const key = `${row.groupId}:${row.slotIndex}`;
+    const speakers = topSpeakersBySlot.get(key) ?? [];
+    topSpeakersBySlot.set(key, [...speakers, { speaker: row.speaker, messageCount: row.messageCount }]);
+  }
+  const busiestHourRows = db
+    .prepare(`
+      WITH hour_counts AS (
+        SELECT group_id AS groupId,
+               CAST((sent_at - @fromUnix) / @slotSeconds AS INTEGER) AS slotIndex,
+               CAST((sent_at - @fromUnix) / 3600 AS INTEGER) AS hourIndex,
+               COUNT(*) AS messageCount
+        FROM messages
+        WHERE group_id IN (${placeholders})
+          AND sent_at >= @fromUnix
+          AND sent_at < @toUnix
+        GROUP BY groupId, slotIndex, hourIndex
+      ), ranked AS (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY groupId, slotIndex
+          ORDER BY messageCount DESC, hourIndex ASC
+        ) AS hourRank
+        FROM hour_counts
+      )
+      SELECT groupId, slotIndex, hourIndex, messageCount
+      FROM ranked
+      WHERE hourRank = 1
+    `)
+    .all(queryParams);
+  const busiestHourBySlot = new Map(busiestHourRows.map((row) => [`${row.groupId}:${row.slotIndex}`, row]));
+
+  return normalizedGroupIds.map((groupId) => {
+    const coverage = getCoverage(db, groupId);
+    const slots = slotBounds.map((slot) => {
+      const durationSeconds = slot.endUnix - slot.startUnix;
+      const coveredSeconds = coverage.reduce(
+        (total, range) => total + overlapSeconds(range.startUnix, range.endUnix, slot.startUnix, slot.endUnix),
+        0,
+      );
+      const coveredSegments = coverage
+        .map((range) => ({
+          startUnix: Math.max(range.startUnix, slot.startUnix),
+          endUnix: Math.min(range.endUnix, slot.endUnix),
+        }))
+        .filter((range) => range.startUnix < range.endUnix);
+      const key = `${groupId}:${slot.index}`;
+      const activity = activityBySlot.get(key);
+      const busiestHour = busiestHourBySlot.get(key);
+      return {
+        ...slot,
+        coveredSeconds,
+        coverageRatio: durationSeconds > 0 ? coveredSeconds / durationSeconds : 0,
+        coverageStartUnix: coveredSegments[0]?.startUnix ?? null,
+        coverageEndUnix: coveredSegments.at(-1)?.endUnix ?? null,
+        coverageSegmentCount: coveredSegments.length,
+        coverageSegments: coveredSegments,
+        messageCount: activity?.messageCount ?? 0,
+        textCount: activity?.textCount ?? 0,
+        mediaCount: activity?.mediaCount ?? 0,
+        speakerCount: activity?.speakerCount ?? 0,
+        firstMessageUnix: activity?.firstMessageUnix ?? null,
+        lastMessageUnix: activity?.lastMessageUnix ?? null,
+        busiestHourStartUnix: busiestHour === undefined ? null : fromUnix + busiestHour.hourIndex * 3600,
+        busiestHourMessageCount: busiestHour?.messageCount ?? 0,
+        topSpeakers: topSpeakersBySlot.get(key) ?? [],
+      };
+    });
+    return { groupId, name: names.get(groupId) ?? "", slots };
+  });
+};
+
 const getStoredGroups = (db) =>
   db
     .prepare(`
@@ -319,9 +596,12 @@ module.exports = {
   sanitizeSnippet,
   lightCleanText,
   ingestExport,
-  pruneStore,
   queryMessages,
   getCoverage,
+  getCoverageHealth,
+  getRangeActivity,
+  getEventActivity,
+  getCoverageTimeline,
   getCoverageEnds,
   getStoredGroups,
   getGroupSummaries,

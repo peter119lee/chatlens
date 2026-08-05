@@ -18,14 +18,15 @@
         <button data-view="run" class="active">运行</button>
         <button data-view="messages">消息</button>
         <button data-view="history">历史报告</button>
-        <button data-view="media">媒体</button>
+        <button data-view="media">画廊</button>
+        <button data-view="knowledge">咒语库</button>
         <button data-view="watchlist">关注群</button>
+        <button data-view="storage">存储</button>
         <button data-view="settings">设置</button>
       </nav>
       <div class="rail-foot">
         <div class="settings-row">
           <button id="theme-toggle" class="btn small">🌙 夜间模式</button>
-          <button id="icons-toggle" class="btn small">图标：开</button>
         </div>
         <p>只读本地 QQNT 数据库副本。<br>不发消息，不动原始数据。</p>
       </div>
@@ -39,15 +40,23 @@
       <div id="view-messages" class="view" hidden></div>
       <div id="view-history" class="view" hidden></div>
       <div id="view-media" class="view" hidden></div>
+      <div id="view-knowledge" class="view" hidden></div>
       <div id="view-watchlist" class="view" hidden></div>
       <div id="view-reader" class="view" hidden></div>
+      <div id="view-storage" class="view" hidden></div>
       <div id="view-settings" class="view" hidden></div>
     </main>
   </div>
+  <script src="/timeline_tools.js"></script>
+  <script src="/gallery_tools.js"></script>
   <script src="/app.js"></script>
   <script src="/reader.js"></script>
   <script src="/messages.js"></script>
   <script src="/media.js"></script>
+  <script src="/knowledge_grid_math.js"></script>
+  <script src="/knowledge_grid.js"></script>
+  <script src="/knowledge.js"></script>
+  <script src="/storage.js"></script>
   <script src="/settings.js"></script>
 </body>
 </html>

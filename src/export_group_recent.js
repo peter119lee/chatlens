@@ -419,8 +419,9 @@ const exportMessages = (args, key) => {
     // streak of out-of-window rows aborted long before a busy group's in-window
     // history was reached — one backfilled batch near the top hid >99% of the
     // messages. Fetch each group straight through the [40027] (group id) index
-    // instead: it returns only that group's rows (~10^5, sub-second), and we
-    // window-filter in JS, also sidestepping corrupt pages a full scan would hit.
+    // instead and push the upper time bound into SQLite. This excludes newer
+    // rows before they consume the per-group scan budget; JS still performs the
+    // lower-bound early stop and sidesteps corrupt pages a full scan would hit.
     const stmt = db.prepare(
       [
         "select",
@@ -440,7 +441,7 @@ const exportMessages = (args, key) => {
         "  [40093] as sender_name2,",
         "  hex([40800]) as body_hex",
         "from group_msg_table",
-        "where [40027] = ?",
+        "where [40027] = ? and [40050] < ?",
         "order by [40003] desc",
       ].join("\n"),
     );
@@ -477,7 +478,7 @@ const exportMessages = (args, key) => {
       let olderStreak = 0;
       try {
         // Index-driven, newest-first (msg_seq desc) walk of just this group's rows.
-        for (const row of stmt.iterate(groupIdInt)) {
+        for (const row of stmt.iterate(groupIdInt, endUnix)) {
           scanned += 1;
           groupScanned += 1;
           if (groupScanned > perGroupScanLimit) {
@@ -567,15 +568,39 @@ const exportMessages = (args, key) => {
         }
       }
     }
+    // Quote links are collected separately rather than pushed into
+    // mediaMessages: an entry with no mediaRefs of its own would inflate
+    // matchedMedia, the 媒体消息 topic count, and leave empty 📷 rows in the
+    // message store.
+    const quoteLinks = [];
     const dedupedMediaMessages = [];
     for (const media of mediaMessages) {
+      const quotedImageHashes = [];
       const keptRefs = media.mediaRefs.filter((ref) => {
         if (ref.kind === "emoji" || ref.hash === null) {
           return true;
         }
         const owner = earliestOwnerByHash.get(`${media.groupId}|${ref.hash}`);
-        return owner !== undefined && owner.sentAt === media.sentAt && owner.rowId === String(media.rowId);
+        const isOwner = owner !== undefined && owner.sentAt === media.sentAt && owner.rowId === String(media.rowId);
+        // A ref this message did NOT originate identifies the image it is
+        // quoting. Dropping it from mediaRefs is right (it is not this
+        // person's image), but the link itself is what makes a "show me the
+        // prompt" ask resolvable to a specific picture.
+        if (!isOwner && ref.kind === "image") {
+          quotedImageHashes.push(ref.hash);
+        }
+        return isOwner;
       });
+      if (quotedImageHashes.length > 0) {
+        quoteLinks.push({
+          groupId: media.groupId,
+          rowId: media.rowId,
+          sentAt: media.sentAt,
+          senderUin: media.senderUin,
+          senderName: media.senderName,
+          quotedImageHashes: [...new Set(quotedImageHashes)],
+        });
+      }
       if (keptRefs.length > 0) {
         dedupedMediaMessages.push({ ...media, mediaRefs: keptRefs });
       }
@@ -596,9 +621,10 @@ const exportMessages = (args, key) => {
     const stopReason = scanComplete ? "complete" : scanAborted ? "aborted" : "scan-limit";
 
     if (!scanComplete) {
-      const reasonText = scanAborted ? "数据库副本读取错误过多，扫描提前中止" : "群消息数超过扫描上限";
       console.log(`warning=scan-incomplete reason=${stopReason} groups=${[...incompleteGroups].join(",")}`);
-      console.log(`警告：${reasonText}。可在 config\\defaults.json 提高 defaultScanLimit，或缩小时间范围后重试。`);
+      console.log(scanAborted
+        ? "警告：数据库副本读取失败；当前群和时间块不会标记为已覆盖，错误详情会保留供重试。"
+        : "警告：群消息数达到当前工作块的扫描预算；当前范围不会标记为已覆盖，可缩小时间块后重试。");
     }
 
     const output = {
@@ -616,9 +642,19 @@ const exportMessages = (args, key) => {
       errors,
       messages: messages.sort(sortByTimeAndRow),
       mediaMessages: dedupedMediaMessages.sort(sortByTimeAndRow),
+      // Which image each reply is quoting. Consumed by the prompt-request
+      // pairing; carries no media of its own.
+      quoteLinks: quoteLinks.sort(sortByTimeAndRow),
     };
 
     fs.writeFileSync(args.outputPath, JSON.stringify(output, null, 2), "utf8");
+    return {
+      matched: output.matched,
+      matchedMedia: output.matchedMedia,
+      scanned: output.scanned,
+      scanComplete,
+      stopReason,
+    };
   } finally {
     db.close();
   }
@@ -627,7 +663,10 @@ const exportMessages = (args, key) => {
 const main = () => {
   const args = parseArgs(process.argv);
   const key = requireEnv("NTQQ_DB_KEY");
-  exportMessages(args, key);
+  const result = exportMessages(args, key);
+  console.log(
+    `exportResult scanComplete=${result.scanComplete} stopReason=${result.stopReason} scanned=${result.scanned} matched=${result.matched} matchedMedia=${result.matchedMedia}`,
+  );
 };
 
 main();

@@ -7,7 +7,16 @@ param(
     [string]$NtDataDir,
 
     [Parameter(Mandatory = $true)]
-    [string]$FormatsCsv
+    [string]$FormatsCsv,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ObjectDir,
+
+    [Parameter(Mandatory = $true)]
+    [string]$KnowledgeDbPath,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ToolRoot
 )
 
 Set-StrictMode -Version 2.0
@@ -26,7 +35,14 @@ if ([string]::IsNullOrWhiteSpace($NtDataDir) -or -not (Test-Path -LiteralPath $N
 }
 
 $mediaDir = Join-Path $RunDir 'media'
-node "$PSScriptRoot\..\src\export_media_files.js" $mediaMessagesJson $NtDataDir $mediaDir $FormatsCsv
+node "$PSScriptRoot\..\src\export_media_files.js" `
+    $mediaMessagesJson `
+    $NtDataDir `
+    $mediaDir `
+    $FormatsCsv `
+    $ObjectDir `
+    $KnowledgeDbPath `
+    $ToolRoot
 if ($LASTEXITCODE -ne 0) {
     throw "媒体导出失败。RunDir=$RunDir NtDataDir=$NtDataDir ExitCode=$LASTEXITCODE"
 }

@@ -77,7 +77,7 @@ const buildPrompt = (input) => {
     `以下是 QQ 群「${input.groupName || input.groupId}」中用户手动选取的一段连续消息（共 ${lines.length} 条）。`,
     "请只针对这段消息输出 JSON（简体中文）：",
     '{"summary": "两三句话概括这段对话", "points": ["要点1", "要点2"], "actions": [{"text": "待办或提问", "status": "open 或 resolved", "resolution": "若已解决，说明谁如何解决"}]}',
-    "规则：points 3-8 条，按时间顺序；actions 只列真实的待办/提问，检查后文是否已有人回应，已回应的标 resolved；没有则给空数组。",
+    "规则：points 3-8 条，按时间顺序；actions 只列明确请求某人执行、明确承诺执行、或带责任/截止时间的事项。普通提问、求购、求推荐和征询意见不算 action。检查后文，明确完成的标 resolved；没有则给空数组。",
     "",
     ...lines,
   ].join("\n");

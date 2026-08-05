@@ -55,7 +55,7 @@ const renderInbox = () => {
       el("div", { class: "row", style: "justify-content:space-between;margin-bottom:10px" },
         el("h2", { style: "margin:0" }, "群消息"),
         el("span", { class: "card-sub", style: "margin:0" },
-          `本地记录保留 ${overview?.retentionDays ?? 3} 天 · 点群进入，蓝点是未读数`)),
+          "本地消息永久保留，不会自动删除 · 蓝点是本工具未查看数，不是 QQ 未读")),
       groups.length === 0
         ? el("div", { class: "empty" }, "还没有本地消息记录，先在「运行」页跑一次总结。")
         : el("div", { class: "inbox-list" }, rows)));
@@ -168,7 +168,7 @@ const loadOlderMessages = async () => {
   }
 };
 
-const openChat = async ({ groupId, groupName, fromUnix, toUnix, fromLastRead }) => {
+const openChat = async ({ groupId, groupName, fromUnix, toUnix, fromLastRead, origin, scrollToTime, scrollToRowIds }) => {
   const msg = app.msg;
   // A pending auto-read from the previous chat must never fire against this group.
   if (msgObservers.readTimer !== null) {
@@ -181,9 +181,13 @@ const openChat = async ({ groupId, groupName, fromUnix, toUnix, fromLastRead }) 
   msg.groupName = groupName ?? msg.overview?.groups?.find((group) => group.groupId === groupId)?.name ?? groupId;
   msg.q = "";
   msg.items = [];
+  msg.coverage = null;
   msg.selA = null;
   msg.selB = null;
   msg.scrollToUnread = fromLastRead === true;
+  msg.origin = origin ?? null;
+  msg.scrollToTime = Number.isFinite(scrollToTime) ? scrollToTime : null;
+  msg.scrollToRowIds = Array.isArray(scrollToRowIds) ? [...scrollToRowIds] : [];
 
   const readMark = msg.overview?.groups?.find((group) => group.groupId === groupId)?.readMark ?? null;
   msg.dividerAt = readMark?.sentAt ?? null;
@@ -196,7 +200,9 @@ const openChat = async ({ groupId, groupName, fromUnix, toUnix, fromLastRead }) 
     msg.to = toUnix ?? null;
     msg.rangeKey = "custom";
   }
-  msg.hasOlder = Number.isFinite(msg.from);
+  // A bounded drill-down must stay inside its selected timeline slot.
+  // Only open-ended ranges may page backward into earlier messages.
+  msg.hasOlder = Number.isFinite(msg.from) && !Number.isFinite(msg.to);
 
   renderMessagesView();
   try {
@@ -228,6 +234,29 @@ const openMessagesView = async (preset) => {
     return;
   }
   renderMessagesView();
+};
+
+const rangeCoverage = (coverage, fromUnix, toUnix) => {
+  if (!Array.isArray(coverage) || !Number.isFinite(fromUnix) || !Number.isFinite(toUnix) || fromUnix >= toUnix) {
+    return null;
+  }
+  const coveredSeconds = coverage.reduce((total, range) =>
+    total + Math.max(0, Math.min(toUnix, range.endUnix) - Math.max(fromUnix, range.startUnix)), 0);
+  return {
+    coveredSeconds,
+    missingSeconds: toUnix - fromUnix - coveredSeconds,
+    coverageRatio: coveredSeconds / (toUnix - fromUnix),
+  };
+};
+
+const returnToMessageOrigin = () => {
+  const origin = app.msg.origin;
+  if (origin?.view === "reader" && typeof origin.runId === "string") {
+    openReader(origin.runId);
+    return;
+  }
+  showView(origin?.view ?? "messages");
+  renderCurrentView();
 };
 
 /* ---------- read mark ---------- */
@@ -707,6 +736,18 @@ const renderChat = () => {
   // so selection clicks and style/icon toggles don't jump the chat away.
   const previousScrollTop = document.querySelector(".chat-scroll")?.scrollTop ?? 0;
   const listNodes = buildChatNodes();
+  const boundedCoverage = rangeCoverage(msg.coverage, msg.from, msg.to);
+  const rangeStatus = !Number.isFinite(msg.from) || !Number.isFinite(msg.to)
+    ? null
+    : boundedCoverage === null
+      ? el("div", { class: "chat-range-status loading", "data-testid": "message-range-context" },
+          el("strong", {}, `${unixToHkt(msg.from).slice(0, 16)} - ${unixToHkt(msg.to).slice(5, 16)}`),
+          el("span", {}, "正在核对扫描覆盖…"))
+    : el("div", { class: `chat-range-status ${boundedCoverage.missingSeconds === 0 ? "complete" : "partial"}`, "data-testid": "message-range-context" },
+        el("strong", {}, `${unixToHkt(msg.from).slice(0, 16)} - ${unixToHkt(msg.to).slice(5, 16)}`),
+        el("span", {}, boundedCoverage.missingSeconds === 0
+          ? "完整扫描"
+          : `扫描 ${Math.round(boundedCoverage.coverageRatio * 100)}% · 缺失 ${formatDuration(boundedCoverage.missingSeconds)}`));
 
   const list = el("div", { class: `chat-scroll ${msg.style === "compact" ? "msg-list" : "chat-list"}` },
     msg.hasOlder && msg.items.length > 0 ? el("div", { class: "load-sentinel-top empty" }, "上滑加载更早…") : null,
@@ -717,7 +758,10 @@ const renderChat = () => {
 
   const header = el("div", { class: "card chat-head" },
     el("div", { class: "row", style: "margin-bottom:10px" },
-      el("button", { class: "btn small", onclick: () => { openMessagesView(); } }, "← 群列表"),
+      el("button", {
+        class: "btn small",
+        onclick: () => msg.origin === null ? openMessagesView() : returnToMessageOrigin(),
+      }, msg.origin === null ? "← 群列表" : `← ${msg.origin.label}`),
       avatarEl(msg.groupName, msg.groupId, "sm", groupAvatarUrl(msg.groupId)),
       el("h2", { style: "margin:0;font-size:16px" }, msg.groupName),
       el("span", { class: "card-sub", style: "margin:0" }, `${msg.items.length} 条${msg.hasMore ? "+" : ""}`),
@@ -730,7 +774,8 @@ const renderChat = () => {
           renderMessagesView();
         },
       }, msg.style === "compact" ? "🗨️ 气泡模式" : "☰ 紧凑模式"),
-      el("button", { class: "btn small", onclick: markReadToLatest }, "全部标为已读")),
+      el("button", { class: "btn small", onclick: markReadToLatest }, "全部标为本工具已查看")),
+    rangeStatus,
     el("div", { class: "row" },
       chatRangeChips(),
       el("input", {
@@ -774,7 +819,18 @@ const renderChat = () => {
   setChildren($("#view-messages"), header, el("div", { class: "chat-wrap" }, list, toBottom), selectionBar);
   setupChatObservers(list);
 
-  if (msg.scrollToTime != null) {
+  if (Array.isArray(msg.scrollToRowIds) && msg.scrollToRowIds.length > 0) {
+    const messageNodes = [...list.querySelectorAll("[data-rowid]")];
+    const hit = msg.scrollToRowIds
+      .map((rowId) => messageNodes.find((node) => node.dataset.rowid === rowId))
+      .find((node) => node !== undefined);
+    if (hit !== undefined) {
+      msg.scrollToRowIds = [];
+      msg.scrollToTime = null;
+      hit.classList.add("msg-origin-hit");
+      hit.scrollIntoView({ block: "center" });
+    }
+  } else if (msg.scrollToTime != null) {
     const targetTime = msg.scrollToTime;
     msg.scrollToTime = null;
     const hit = [...list.querySelectorAll("[data-sentat]")].find((node) => Number(node.dataset.sentat) >= targetTime);
